@@ -1,0 +1,143 @@
+--- a/src/drivers/display/drm/lv_linux_drm.c
++++ b/src/drivers/display/drm/lv_linux_drm.c
+@@ -24,6 +24,7 @@
+ 
+ #include "../../../stdlib/lv_sprintf.h"
+ #include "../../../draw/lv_draw_buf.h"
++#include "../../../draw/sw/lv_draw_sw.h"
+ 
+ #if LV_USE_LINUX_DRM_GBM_BUFFERS
+     #include <gbm.h>
+@@ -79,6 +80,9 @@
+     drmModePropertyPtr conn_props[128];
+     drm_buffer_t drm_bufs[BUFFER_CNT];
+     drm_buffer_t * act_buf;
++    uint8_t * render_buf;
++    size_t render_buf_size;
++    uint8_t next_buf;
+ #if LV_USE_LINUX_DRM_GBM_BUFFERS
+     struct gbm_device * gbm_device;
+ #endif
+@@ -117,6 +121,7 @@
+ static void drm_flush_wait(lv_display_t * drm_dev);
+ static void drm_flush(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map);
+ static void drm_dmabuf_set_active_buf(lv_event_t * event);
++static void drm_rotation_event_cb(lv_event_t * event);
+ static void drm_del_event_cb(lv_event_t * event);
+ 
+ /**********************
+@@ -175,14 +180,20 @@
+     act_buf = lv_display_get_buf_active(disp);
+ 
+     if(drm_dev->act_buf == NULL) {
+-
+-        for(i = 0; i < BUFFER_CNT; i++) {
+-            if(act_buf->unaligned_data == drm_dev->drm_bufs[i].map) {
+-                drm_dev->act_buf = &drm_dev->drm_bufs[i];
+-                LV_LOG_TRACE("Set active buffer idx: %d", i);
+-                break;
++        if(lv_display_get_render_mode(disp) == LV_DISPLAY_RENDER_MODE_DIRECT) {
++            for(i = 0; i < BUFFER_CNT; i++) {
++                if(act_buf->unaligned_data == drm_dev->drm_bufs[i].map) {
++                    drm_dev->act_buf = &drm_dev->drm_bufs[i];
++                    LV_LOG_TRACE("Set active buffer idx: %d", i);
++                    break;
++                }
+             }
+         }
++        else {
++            drm_dev->act_buf = &drm_dev->drm_bufs[drm_dev->next_buf];
++            LV_LOG_TRACE("Set active buffer idx: %d", drm_dev->next_buf);
++            drm_dev->next_buf = (drm_dev->next_buf + 1) % BUFFER_CNT;
++        }
+ 
+ #if LV_USE_LINUX_DRM_GBM_BUFFERS
+         struct dma_buf_sync sync_req;
+@@ -230,12 +241,23 @@
+ 
+     size_t buf_size = LV_MIN(drm_dev->drm_bufs[1].size, drm_dev->drm_bufs[0].size);
+     uint32_t stride = drm_dev->drm_bufs[0].pitch;
+-    /* Resolution must be set first because if the screen is smaller than the size passed
+-     * to lv_display_create then the buffers aren't big enough for LV_DISPLAY_RENDER_MODE_DIRECT.
+-     */
++
++    lv_color_format_t color_format = lv_display_get_color_format(disp);
++    drm_dev->render_buf_size =
++        (size_t)lv_draw_buf_width_to_stride(hor_res, color_format) * ver_res;
++    drm_dev->render_buf = lv_malloc(drm_dev->render_buf_size);
++    if(!drm_dev->render_buf) {
++        LV_LOG_ERROR("DRM render buffer allocation failed");
++        return LV_RESULT_INVALID;
++    }
++
++    /* Portrait keeps the zero-copy direct path. Landscape switches to the
++     * separate full render buffer so flush can rotate into native scanout. */
+     lv_display_set_resolution(disp, hor_res, ver_res);
+     lv_display_set_buffers_with_stride(disp, drm_dev->drm_bufs[1].map, drm_dev->drm_bufs[0].map, buf_size,
+                                        stride, LV_DISPLAY_RENDER_MODE_DIRECT);
++    lv_display_add_event_cb(disp, drm_rotation_event_cb,
++                            LV_EVENT_RESOLUTION_CHANGED, drm_dev);
+ 
+ 
+     /* Set the handler that is called before a redraw occurs to set the active buffer/plane
+@@ -1089,11 +1111,21 @@
+     if(!lv_display_flush_is_last(disp)) return;
+ 
+     LV_UNUSED(area);
+-    LV_UNUSED(px_map);
+     drm_dev_t * drm_dev = lv_display_get_driver_data(disp);
+ 
+     LV_ASSERT(drm_dev->act_buf != NULL);
+ 
++    if(lv_display_get_render_mode(disp) != LV_DISPLAY_RENDER_MODE_DIRECT) {
++        const lv_color_format_t color_format = lv_display_get_color_format(disp);
++        const lv_display_rotation_t rotation = lv_display_get_rotation(disp);
++        const int32_t src_width = lv_display_get_horizontal_resolution(disp);
++        const int32_t src_height = lv_display_get_vertical_resolution(disp);
++        const uint32_t src_stride = lv_draw_buf_width_to_stride(src_width, color_format);
++        lv_draw_sw_rotate(px_map, drm_dev->act_buf->map, src_width, src_height,
++                          src_stride, drm_dev->act_buf->pitch, rotation,
++                          color_format);
++    }
++
+     if(drm_dmabuf_set_plane(drm_dev, drm_dev->act_buf)) {
+         LV_LOG_ERROR("Flush fail");
+         return;
+@@ -1103,6 +1135,25 @@
+ 
+ }
+ 
++static void drm_rotation_event_cb(lv_event_t * event)
++{
++    lv_display_t * disp = lv_event_get_current_target(event);
++    drm_dev_t * drm_dev = lv_event_get_user_data(event);
++
++    if(lv_display_get_rotation(disp) == LV_DISPLAY_ROTATION_0) {
++        size_t buf_size = LV_MIN(drm_dev->drm_bufs[1].size, drm_dev->drm_bufs[0].size);
++        lv_display_set_buffers_with_stride(disp, drm_dev->drm_bufs[1].map,
++                                           drm_dev->drm_bufs[0].map, buf_size,
++                                           drm_dev->drm_bufs[0].pitch,
++                                           LV_DISPLAY_RENDER_MODE_DIRECT);
++    }
++    else {
++        lv_display_set_buffers(disp, drm_dev->render_buf, NULL,
++                               drm_dev->render_buf_size,
++                               LV_DISPLAY_RENDER_MODE_FULL);
++    }
++}
++
+ static void drm_del_event_cb(lv_event_t * e)
+ {
+     if(LV_EVENT_DELETE != lv_event_get_code(e))
+@@ -1224,6 +1275,11 @@
+         drm_dev->fd = -1;
+     }
+ 
++    if(drm_dev->render_buf) {
++        lv_free(drm_dev->render_buf);
++        drm_dev->render_buf = NULL;
++    }
++
+     lv_display_set_driver_data(disp, NULL);
+     lv_free(drm_dev);
+ }
