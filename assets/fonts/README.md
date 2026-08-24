@@ -1,15 +1,16 @@
 # CM0 UI Fonts
 
-The checked-in `src/fonts/cm0_font_ui_*.c` files are composite LVGL fonts:
+AppKit loads the bundled font files at runtime through LVGL's FreeType backend:
 
 - Latin, numbers, and punctuation: Inter Regular variable font
 - Simplified Chinese: Source Han Sans SC Normal
 - LVGL symbols: Font Awesome 5
 
-The generated public font name is `CM0 UI`, not an upstream reserved font
-name. Chinese glyphs are deliberately limited to `glyphs.txt` to control the
-size of statically linked applications. The original font files used to
-generate the subsets are stored in this directory.
+Fonts returned by `lilygo_ui_font_get()` use Inter as the primary face, Source
+Han Sans SC as the Chinese fallback, and Font Awesome as the symbol fallback.
+Installed systems read them from `/usr/share/lilygo-ui/fonts`; source builds
+fall back to this directory. `LILYGO_UI_FONT_DIR` can override that location
+for tests.
 
 Generation inputs used for this revision:
 
@@ -24,10 +25,10 @@ FontAwesome5-Solid+Brands+Regular.woff SHA-256:
 f4e42f6cd69e5dbdcccc0f2f5be136cebde0e427641e45403bf9173a92da95f4
 ```
 
-Run `./generate_fonts.sh` to regenerate `src/fonts/cm0_font_ui_*.c` from the
-bundled assets. Set `LV_FONT_CONV` to an installed `lv_font_conv` executable
-when it is not on `PATH`. Three explicit font paths may be passed to override
-the bundled inputs.
+The runtime assets occupy 17,644,748 bytes. Most of that is the 16,414,944-byte
+Source Han Sans SC face. This is an intentional platform storage tradeoff: one
+shared `lilygo-ui-appkit-dev` package replaces per-application bitmap subsets and
+supports UI text that is not known at build time.
 
-Keep `licenses/NOTICE.md` and `licenses/OFL-1.1.txt` in distributions that
-embed these generated fonts.
+Keep `licenses/NOTICE.md` and `licenses/OFL-1.1.txt` with every distribution of
+the runtime fonts.

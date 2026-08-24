@@ -72,12 +72,12 @@ The package provides, conflicts with, and replaces the former
 
 ## Fonts
 
-The public LVGL font tokens are `CM0_FONT_UI_14`, `CM0_FONT_UI_22`,
-`CM0_FONT_UI_28`, `CM0_FONT_UI_36`, and `CM0_FONT_UI_48`. See
-`assets/fonts/README.md` for the original font assets, checked-in generated
-subsets, and regeneration instructions. Distributions embedding these fonts
-must retain `assets/fonts/licenses/NOTICE.md` and
-`assets/fonts/licenses/OFL-1.1.txt`.
+Use `lilygo_ui_font_get()` with 14, 22, 28, 36, or 48 for the public LVGL
+fonts. See
+`assets/fonts/README.md` for the FreeType fallback chain, runtime paths, and
+documented storage budget. Device applications depend on the shared
+`lilygo-ui-appkit-dev` package. Font distributions must retain
+`assets/fonts/licenses/NOTICE.md` and `assets/fonts/licenses/OFL-1.1.txt`.
 
 Original images, audio, fonts, and similar media belong under `assets/`.
 Generated LVGL C sources remain under `src/`.

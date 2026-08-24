@@ -3,16 +3,15 @@
 
 #include <lvgl.h>
 
-LV_FONT_DECLARE(cm0_font_ui_14)
-LV_FONT_DECLARE(cm0_font_ui_22)
-LV_FONT_DECLARE(cm0_font_ui_28)
-LV_FONT_DECLARE(cm0_font_ui_36)
-LV_FONT_DECLARE(cm0_font_ui_48)
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-#define CM0_FONT_UI_14 (&cm0_font_ui_14)
-#define CM0_FONT_UI_22 (&cm0_font_ui_22)
-#define CM0_FONT_UI_28 (&cm0_font_ui_28)
-#define CM0_FONT_UI_36 (&cm0_font_ui_36)
-#define CM0_FONT_UI_48 (&cm0_font_ui_48)
+const lv_font_t *lilygo_ui_font_get(uint32_t size);
+void lilygo_ui_fonts_deinit(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -34,6 +34,30 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "Statically link LVGL into each application
 
 if(NOT TARGET lvgl)
     find_package(PkgConfig REQUIRED)
+    find_package(Freetype REQUIRED)
+    set(_cm0_freetype_link_libraries Freetype::Freetype)
+    set(_cm0_freetype_library "${FREETYPE_LIBRARY_RELEASE}")
+    if(NOT _cm0_freetype_library)
+        set(_cm0_freetype_library "${FREETYPE_LIBRARIES}")
+    endif()
+    if(_cm0_freetype_library MATCHES "\\.a$")
+        # FindFreetype does not expose the private dependencies needed by a
+        # static libfreetype. Some BSPs contain only that archive (or a broken
+        # shared-library symlink), so resolve the dependencies explicitly.
+        find_library(_cm0_freetype_zlib NAMES z libz.so.1 REQUIRED)
+        find_library(_cm0_freetype_bzip2 NAMES bz2 libbz2.so.1.0 REQUIRED)
+        find_library(_cm0_freetype_png NAMES png16 png libpng16.so.16 REQUIRED)
+        find_library(_cm0_freetype_brotlidec
+            NAMES brotlidec libbrotlidec.so.1 REQUIRED)
+        find_library(_cm0_freetype_brotlicommon
+            NAMES brotlicommon libbrotlicommon.so.1 REQUIRED)
+        list(APPEND _cm0_freetype_link_libraries
+            "${_cm0_freetype_png}"
+            "${_cm0_freetype_zlib}"
+            "${_cm0_freetype_bzip2}"
+            "${_cm0_freetype_brotlidec}"
+            "${_cm0_freetype_brotlicommon}")
+    endif()
     if(CM0_SIMULATOR)
         pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
     else()
@@ -144,9 +168,11 @@ if(NOT TARGET lvgl)
                 TARGET_DIRECTORY lvgl APPEND PROPERTY COMPILE_OPTIONS
                 "-include${_cm0_appkit_dir}/config/lv_sdl_high_dpi.h")
         endif()
-        target_link_libraries(lvgl PUBLIC PkgConfig::SDL2)
+        target_link_libraries(lvgl PUBLIC
+            PkgConfig::SDL2 ${_cm0_freetype_link_libraries})
     else()
-        target_link_libraries(lvgl PUBLIC PkgConfig::DRM)
+        target_link_libraries(lvgl PUBLIC
+            PkgConfig::DRM ${_cm0_freetype_link_libraries})
     endif()
 endif()
 
@@ -163,12 +189,12 @@ function(_cm0_ensure_ui_fonts)
     if(TARGET cm0_ui_fonts)
         return()
     endif()
-    target_sources(lvgl PRIVATE
-        "${_cm0_appkit_dir}/src/fonts/cm0_font_ui_14.c"
-        "${_cm0_appkit_dir}/src/fonts/cm0_font_ui_22.c"
-        "${_cm0_appkit_dir}/src/fonts/cm0_font_ui_28.c"
-        "${_cm0_appkit_dir}/src/fonts/cm0_font_ui_36.c"
-        "${_cm0_appkit_dir}/src/fonts/cm0_font_ui_48.c")
+    target_sources(lvgl PRIVATE "${_cm0_appkit_dir}/src/typography.cpp")
+    target_include_directories(lvgl PRIVATE "${_cm0_appkit_dir}/include")
+    target_compile_features(lvgl PRIVATE cxx_std_17)
+    target_compile_definitions(lvgl PRIVATE
+        LILYGO_UI_FONT_INSTALL_DIR="${CMAKE_INSTALL_FULL_DATAROOTDIR}/lilygo-ui/fonts"
+        LILYGO_UI_FONT_SOURCE_DIR="${_cm0_appkit_dir}/assets/fonts")
     add_library(cm0_ui_fonts INTERFACE)
     target_include_directories(cm0_ui_fonts INTERFACE
         "${_cm0_appkit_dir}/include")
@@ -311,7 +337,7 @@ macro(lilygo_ui_enable_standalone_package app_slug)
         "${LILYGO_UI_VENDOR_SLUG}-ui-${_cm0_package_slug}")
     set(CPACK_DEBIAN_APP_FILE_NAME DEB-DEFAULT)
     set(CPACK_DEBIAN_APP_PACKAGE_DEPENDS
-        "libc6, libstdc++6, libdrm2")
+        "libc6, libstdc++6, libdrm2, libfreetype6, lilygo-ui-appkit-dev")
     set(CPACK_DEBIAN_APP_PACKAGE_PROVIDES
         "${CM0_VENDOR_SLUG}-cm0-${_cm0_package_slug} (= ${PROJECT_VERSION})")
     set(CPACK_DEBIAN_APP_PACKAGE_CONFLICTS
@@ -345,7 +371,7 @@ macro(cm0_enable_standalone_package app_slug)
         "${CM0_VENDOR_SLUG}-cm0-${_cm0_package_slug}")
     set(CPACK_DEBIAN_APP_FILE_NAME DEB-DEFAULT)
     set(CPACK_DEBIAN_APP_PACKAGE_DEPENDS
-        "libc6, libstdc++6, libdrm2")
+        "libc6, libstdc++6, libdrm2, libfreetype6, lilygo-ui-appkit-dev")
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
     if(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
         set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "arm64")

@@ -87,7 +87,7 @@ lv_obj_t *create_status_bar_view(lv_obj_t *parent, StatusBarState *state) {
   state->clock = lv_label_create(time_container);
   lv_obj_set_name_static(state->clock, "cm0_status_bar_clock");
   lv_label_set_text(state->clock, "9:41");
-  lv_obj_set_style_text_font(state->clock, CM0_FONT_UI_22, 0);
+  lv_obj_set_style_text_font(state->clock, lilygo_ui_font_get(22), 0);
   lv_obj_set_style_text_color(state->clock, lv_color_hex(0x000000), 0);
   lv_obj_center(state->clock);
 
@@ -162,7 +162,7 @@ lv_obj_t *create_status_bar_view(lv_obj_t *parent, StatusBarState *state) {
   state->battery_label = lv_label_create(state->battery_bar);
   lv_obj_set_name_static(state->battery_label, "cm0_status_bar_battery_text");
   lv_label_set_text(state->battery_label, "82");
-  lv_obj_set_style_text_font(state->battery_label, CM0_FONT_UI_22, 0);
+  lv_obj_set_style_text_font(state->battery_label, lilygo_ui_font_get(22), 0);
   lv_obj_set_style_text_color(state->battery_label, lv_color_hex(0xffffff), 0);
   lv_obj_center(state->battery_label);
 

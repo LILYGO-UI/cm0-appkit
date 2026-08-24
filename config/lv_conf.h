@@ -38,7 +38,12 @@
 #define LV_FONT_MONTSERRAT_28 0
 #define LV_FONT_MONTSERRAT_36 0
 #define LV_FONT_MONTSERRAT_48 0
-#define LV_FONT_CUSTOM_DECLARE LV_FONT_DECLARE(cm0_font_ui_14)
-#define LV_FONT_DEFAULT &cm0_font_ui_14
+#define LV_USE_FREETYPE 1
+#define LV_FREETYPE_USE_LVGL_PORT 0
+#define LV_FREETYPE_CACHE_FT_GLYPH_CNT 256
+#define LV_FONT_CUSTOM_DECLARE                                                \
+  const lv_font_t *lilygo_ui_font_get(uint32_t size);                        \
+  void lilygo_ui_fonts_deinit(void);
+#define LV_FONT_DEFAULT lilygo_ui_font_get(14)
 
 #endif

@@ -42,6 +42,7 @@ static constexpr int32_t kExitGestureMinStartZone = 48;
 static constexpr int32_t kExitGestureMaxStartZone = 96;
 static constexpr int32_t kExitGestureMinDistance = 72;
 static constexpr int32_t kExitGestureMaxDistance = 120;
+static constexpr uint32_t kPageBackgroundColor = 0xf2f2f7;
 
 static volatile sig_atomic_t app_running;
 static volatile sig_atomic_t display_alive;
@@ -145,6 +146,7 @@ public:
       lv_sdl_quit();
 #endif
     lv_log_register_print_cb(NULL);
+    lilygo_ui_fonts_deinit();
     lv_deinit();
   }
 
@@ -261,7 +263,9 @@ static void apply_display_orientation(lv_display_t *display,
 
 static lv_obj_t *create_app_root(void) {
   lv_obj_t *screen = lv_screen_active();
-  lv_obj_set_style_bg_color(screen, lv_color_hex(0xf7f7f8), 0);
+  lv_obj_set_style_bg_color(screen, lv_color_hex(kPageBackgroundColor), 0);
+  lv_obj_set_style_bg_grad_dir(screen, LV_GRAD_DIR_NONE, 0);
+  lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
   lv_obj_set_style_radius(screen, 36, 0);
   lv_obj_set_style_clip_corner(screen, true, 0);
 
@@ -277,7 +281,9 @@ static lv_obj_t *create_app_root(void) {
   lv_obj_set_style_pad_top(content, CM0_STATUS_BAR_HEIGHT, 0);
   lv_obj_set_style_border_width(content, 0, 0);
   lv_obj_set_style_radius(content, 0, 0);
-  lv_obj_set_style_bg_color(content, lv_color_hex(0xf7f7f8), 0);
+  lv_obj_set_style_bg_color(content, lv_color_hex(kPageBackgroundColor), 0);
+  lv_obj_set_style_bg_grad_dir(content, LV_GRAD_DIR_NONE, 0);
+  lv_obj_set_style_bg_opa(content, LV_OPA_COVER, 0);
   lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t *home_indicator = cm0_home_indicator_create(system_layer);
