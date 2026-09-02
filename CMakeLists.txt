@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(LilyGoUI VERSION 1.2.0 LANGUAGES C CXX)
+project(LilyGoUI VERSION 0.1.0 LANGUAGES C CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 include(CTest)

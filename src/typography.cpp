@@ -1,9 +1,9 @@
 #include <cm0/typography.h>
 
-#include <array>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <vector>
 
 #ifndef LILYGO_UI_FONT_INSTALL_DIR
 #define LILYGO_UI_FONT_INSTALL_DIR "/usr/share/lilygo-ui/fonts"
@@ -26,7 +26,7 @@ struct FontSet {
   lv_font_t *symbols = nullptr;
 };
 
-std::array<FontSet, 5> fonts{{{14}, {22}, {28}, {36}, {48}}};
+std::vector<FontSet> fonts{{14}, {22}, {28}, {36}, {48}};
 
 bool readable_font(const char *directory, const char *filename) {
   if (!directory || !directory[0])
@@ -108,8 +108,10 @@ extern "C" const lv_font_t *lilygo_ui_font_get(uint32_t size) {
     if (set.size == size)
       return initialize(set) ? set.inter : nullptr;
   }
-  fprintf(stderr, "[appkit] unsupported UI font size: %u\n", size);
-  return nullptr;
+
+  fonts.emplace_back(FontSet{size});
+  FontSet &set = fonts.back();
+  return initialize(set) ? set.inter : nullptr;
 }
 
 extern "C" void lilygo_ui_fonts_deinit(void) {
