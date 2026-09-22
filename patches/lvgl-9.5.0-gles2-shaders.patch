@@ -1,0 +1,13 @@
+--- a/src/drivers/opengles/lv_opengles_driver.c
++++ b/src/drivers/opengles/lv_opengles_driver.c
+@@ -525,6 +525,10 @@
+ static unsigned int lv_opengles_shader_manager_init(void)
+ {
+     for(lv_opengl_glsl_version_t version = LV_OPENGL_GLSL_VERSION_300ES; version < LV_OPENGL_GLSL_VERSION_LAST; ++version) {
++#if LV_USE_EGL
++        /* The EGL driver explicitly creates an OpenGL ES 2.0 context. */
++        if(version != LV_OPENGL_GLSL_VERSION_100) continue;
++#endif
+         LV_LOG_INFO("Trying GLSL version %s", lv_opengles_glsl_version_to_string(version));
+         {
+             /* Initialize the shader manager*/

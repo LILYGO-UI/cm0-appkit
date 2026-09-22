@@ -1,0 +1,404 @@
+--- a/src/draw/nanovg/lv_draw_nanovg.c
++++ b/src/draw/nanovg/lv_draw_nanovg.c
+@@ -12,6 +12,7 @@
+ #if LV_USE_DRAW_NANOVG
+ 
+ #include "../../display/lv_display.h"
++#include "../../display/lv_display_private.h"
+ #include "../../core/lv_refr_private.h"
+ #include "lv_draw_nanovg_private.h"
+ #include "lv_nanovg_utils.h"
+@@ -87,6 +88,8 @@
+  *  STATIC VARIABLES
+  **********************/
+ 
++static lv_draw_nanovg_unit_t * g_unit;
++
+ /**********************
+  *      MACROS
+  **********************/
+@@ -97,16 +100,16 @@
+ 
+ void lv_draw_nanovg_init(void)
+ {
+-    static bool initialized = false;
+-    if(initialized) return;
+-    initialized = true;
+-
+-    lv_draw_nanovg_unit_t * unit = lv_draw_create_unit(sizeof(lv_draw_nanovg_unit_t));
+-    unit->base_unit.dispatch_cb = draw_dispatch;
+-    unit->base_unit.evaluate_cb = draw_evaluate;
+-    unit->base_unit.delete_cb = draw_delete;
+-    unit->base_unit.event_cb = draw_event_cb;
+-    unit->base_unit.name = "NANOVG";
++    if(g_unit && g_unit->vg) return;
++    if(!g_unit) {
++        g_unit = lv_draw_create_unit(sizeof(lv_draw_nanovg_unit_t));
++        g_unit->base_unit.dispatch_cb = draw_dispatch;
++        g_unit->base_unit.evaluate_cb = draw_evaluate;
++        g_unit->base_unit.delete_cb = draw_delete;
++        g_unit->base_unit.event_cb = draw_event_cb;
++        g_unit->base_unit.name = "NANOVG";
++    }
++    lv_draw_nanovg_unit_t * unit = g_unit;
+ 
+     unit->vg = NVG_CTX_CREATE(0);
+     LV_ASSERT_MSG(unit->vg != NULL, "NanoVG init failed");
+@@ -117,6 +120,23 @@
+     lv_draw_nanovg_label_init(unit);
+ }
+ 
++void lv_draw_nanovg_reset(void)
++{
++    lv_draw_nanovg_unit_t * unit = g_unit;
++    if(!unit || !unit->vg) return;
++    /* Discard outstanding commands before releasing the resources they refer to. */
++    if(unit->is_started) nvgCancelFrame(unit->vg);
++    lv_nanovg_clean_up(unit);
++    lv_draw_nanovg_label_deinit(unit);
++    lv_nanovg_fbo_cache_deinit(unit);
++    lv_nanovg_image_cache_deinit(unit);
++    lv_nanovg_utils_deinit(unit);
++    NVG_CTX_DELETE(unit->vg);
++    unit->vg = NULL;
++    unit->current_layer = NULL;
++    unit->is_started = false;
++}
++
+ int lv_nanovg_fb_get_image_handle(struct NVGLUframebuffer * fb)
+ {
+     LV_ASSERT_NULL(fb);
+@@ -135,6 +155,36 @@
+ 
+     lv_matrix_t global_matrix;
+     lv_matrix_identity(&global_matrix);
++    /* Only the root is presented to the physical window. Child FBOs stay logical. */
++    lv_display_t * display = lv_refr_get_disp_refreshing();
++    if(display && layer == display->layer_head) {
++        int32_t width = lv_display_get_horizontal_resolution(display);
++        int32_t height = lv_display_get_vertical_resolution(display);
++        switch(lv_display_get_rotation(display)) {
++            case LV_DISPLAY_ROTATION_90:
++                global_matrix.m[0][0] = 0;
++                global_matrix.m[0][1] = 1;
++                global_matrix.m[1][0] = -1;
++                global_matrix.m[1][1] = 0;
++                global_matrix.m[1][2] = width;
++                break;
++            case LV_DISPLAY_ROTATION_180:
++                global_matrix.m[0][0] = -1;
++                global_matrix.m[0][2] = width;
++                global_matrix.m[1][1] = -1;
++                global_matrix.m[1][2] = height;
++                break;
++            case LV_DISPLAY_ROTATION_270:
++                global_matrix.m[0][0] = 0;
++                global_matrix.m[0][1] = -1;
++                global_matrix.m[0][2] = height;
++                global_matrix.m[1][0] = 1;
++                global_matrix.m[1][1] = 0;
++                break;
++            default:
++                break;
++        }
++    }
+     if(layer->buf_area.x1 || layer->buf_area.y1) {
+         lv_matrix_translate(&global_matrix, -layer->buf_area.x1, -layer->buf_area.y1);
+     }
+@@ -220,7 +270,8 @@
+ {
+     LV_PROFILER_DRAW_BEGIN;
+ 
+-    if(!new_layer->user_data) {
++    lv_display_t * display = lv_refr_get_disp_refreshing();
++    if(!new_layer->user_data || (display && new_layer == display->layer_head)) {
+         /* Bind the default framebuffer for normal rendering */
+         nvgluBindFramebuffer(NULL);
+         LV_PROFILER_DRAW_END;
+@@ -334,6 +385,7 @@
+ static int32_t draw_dispatch(lv_draw_unit_t * draw_unit, lv_layer_t * layer)
+ {
+     lv_draw_nanovg_unit_t * u = (lv_draw_nanovg_unit_t *)draw_unit;
++    if(!u->vg) return LV_DRAW_UNIT_IDLE;
+ 
+     lv_draw_task_t * t = lv_draw_get_available_task(layer, NULL, NANOVG_DRAW_UNIT_ID);
+     if(!t || t->preferred_draw_unit_id != NANOVG_DRAW_UNIT_ID) {
+@@ -342,13 +394,26 @@
+     }
+ 
+     if(u->current_layer != layer) {
++        lv_nanovg_end_frame(u);
+         on_layer_changed(layer);
+         u->current_layer = layer;
+     }
+ 
+     if(!u->is_started) {
+-        const int32_t buf_w = lv_area_get_width(&layer->buf_area);
+-        const int32_t buf_h = lv_area_get_height(&layer->buf_area);
++        int32_t buf_w = lv_area_get_width(&layer->buf_area);
++        int32_t buf_h = lv_area_get_height(&layer->buf_area);
++        lv_display_t * display = lv_refr_get_disp_refreshing();
++        if(display && layer == display->layer_head) {
++            lv_display_rotation_t rotation = lv_display_get_rotation(display);
++            if(rotation == LV_DISPLAY_ROTATION_90 || rotation == LV_DISPLAY_ROTATION_270) {
++                int32_t tmp = buf_w;
++                buf_w = buf_h;
++                buf_h = tmp;
++            }
++            /* EGL does not preserve stencil contents across swaps. */
++            glStencilMask(0xff);
++            glClear(GL_STENCIL_BUFFER_BIT);
++        }
+ 
+         glViewport(0, 0, buf_w, buf_h);
+         LV_PROFILER_DRAW_BEGIN_TAG("nvgBeginFrame");
+@@ -371,7 +436,9 @@
+ 
+ static int32_t draw_evaluate(lv_draw_unit_t * draw_unit, lv_draw_task_t * task)
+ {
+-    LV_UNUSED(draw_unit);
++    lv_draw_nanovg_unit_t * unit = (lv_draw_nanovg_unit_t *)draw_unit;
++    lv_display_t * display = lv_refr_get_disp_refreshing();
++    if(!unit->vg || !display || !display->layer_head->user_data) return 0;
+ 
+     switch(task->type) {
+         case LV_DRAW_TASK_TYPE_FILL:
+@@ -409,13 +476,9 @@
+ 
+ static int32_t draw_delete(lv_draw_unit_t * draw_unit)
+ {
+-    lv_draw_nanovg_unit_t * unit = (lv_draw_nanovg_unit_t *)draw_unit;
+-    lv_draw_nanovg_label_deinit(unit);
+-    lv_nanovg_fbo_cache_deinit(unit);
+-    lv_nanovg_image_cache_deinit(unit);
+-    lv_nanovg_utils_deinit(unit);
+-    NVG_CTX_DELETE(unit->vg);
+-    unit->vg = NULL;
++    LV_UNUSED(draw_unit);
++    lv_draw_nanovg_reset();
++    g_unit = NULL;
+     return 0;
+ }
+ 
+@@ -423,6 +486,9 @@
+ {
+     lv_draw_nanovg_unit_t * u = lv_event_get_current_target(e);
+     lv_layer_t * layer = lv_event_get_param(e);
++    if(!u->vg) return;
++    lv_display_t * display = lv_refr_get_disp_refreshing();
++    if(display && !display->layer_head->user_data) return;
+ 
+     switch(lv_event_get_code(e)) {
+         case LV_EVENT_CANCEL:
+--- a/src/draw/nanovg/lv_draw_nanovg_label.c
++++ b/src/draw/nanovg/lv_draw_nanovg_label.c
+@@ -214,7 +214,7 @@
+         size_t free_size = lv_cache_get_free_size(u->letter_cache, NULL);
+         if(free_size == 0) {
+             LV_LOG_INFO("letter cache is full, release all pending cache entries");
+-            lv_nanovg_end_frame(u);
++            lv_nanovg_flush_pending(u);
+         }
+ 
+         cache_node_entry = lv_cache_acquire_or_create(u->letter_cache, &search_key, NULL);
+@@ -245,7 +245,11 @@
+ {
+     LV_PROFILER_DRAW_BEGIN;
+     LV_UNUSED(user_data);
+-    lv_font_glyph_dsc_t * g_dsc = &item->g_dsc;
++    /* Bitmap providers can store an acquired cache entry in the descriptor.
++     * Never mutate the descriptor used as the letter cache's red-black tree key. */
++    lv_font_glyph_dsc_t glyph_dsc = item->g_dsc;
++    lv_font_glyph_dsc_t * g_dsc = &glyph_dsc;
++    item->image_handle = -1;
+ 
+     const uint32_t w = g_dsc->box_w;
+     const uint32_t h = g_dsc->box_h;
+@@ -256,18 +260,36 @@
+         return false;
+     }
+ 
+-    if(!lv_font_get_glyph_bitmap(g_dsc, image_buf)) {
++    const lv_draw_buf_t * glyph_buf = lv_font_get_glyph_bitmap(g_dsc, image_buf);
++    if(!glyph_buf) {
++        lv_font_glyph_release_draw_data(g_dsc);
+         LV_PROFILER_DRAW_END;
+         return false;
++    }
++
++    /* FreeType returns its own cached draw buffer instead of filling image_buf.
++     * GLES2 uploads require tightly packed A8 rows, including for padded glyphs. */
++    if(glyph_buf->header.cf != LV_COLOR_FORMAT_A8 || glyph_buf->header.w < w ||
++       glyph_buf->header.h < h || glyph_buf->header.stride < w) {
++        lv_font_glyph_release_draw_data(g_dsc);
++        LV_LOG_ERROR("Invalid glyph bitmap buffer");
++        LV_PROFILER_DRAW_END;
++        return false;
++    }
++    if(glyph_buf != image_buf) {
++        for(uint32_t y = 0; y < h; ++y) {
++            lv_memcpy(lv_draw_buf_goto_xy(image_buf, 0, y), lv_draw_buf_goto_xy(glyph_buf, 0, y), w);
++        }
+     }
+ 
+     LV_PROFILER_DRAW_BEGIN_TAG("nvgCreateImage");
+     item->image_handle = nvgCreateImage(item->u->vg, w, h, 0, NVG_TEXTURE_ALPHA, lv_draw_buf_goto_xy(image_buf, 0, 0));
+     LV_PROFILER_DRAW_END_TAG("nvgCreateImage");
++    lv_font_glyph_release_draw_data(g_dsc);
+ 
+     LV_LOG_TRACE("image_handle: %d", item->image_handle);
+     LV_PROFILER_DRAW_END;
+-    return true;
++    return item->image_handle > 0;
+ }
+ 
+ static void letter_free_cb(letter_item_t * item, void * user_data)
+@@ -275,7 +297,7 @@
+     LV_UNUSED(user_data);
+     LV_PROFILER_DRAW_BEGIN;
+     LV_LOG_TRACE("image_handle: %d", item->image_handle);
+-    nvgDeleteImage(item->u->vg, item->image_handle);
++    if(item->image_handle > 0) nvgDeleteImage(item->u->vg, item->image_handle);
+     item->image_handle = -1;
+     LV_PROFILER_DRAW_END;
+ }
+--- a/src/draw/nanovg/lv_nanovg_image_cache.c
++++ b/src/draw/nanovg/lv_nanovg_image_cache.c
+@@ -95,6 +95,7 @@
+ 
+     lv_cache_destroy(u->image_cache, NULL);
+     u->image_cache = NULL;
++    lv_ll_clear(&u->image_drop_ll);
+ }
+ 
+ int lv_nanovg_image_cache_get_handle(struct _lv_draw_nanovg_unit_t * u,
+@@ -148,7 +149,7 @@
+         size_t free_size = lv_cache_get_free_size(u->image_cache, NULL);
+         if(free_size == 0) {
+             LV_LOG_INFO("image cache is full, release all pending cache entries");
+-            lv_nanovg_end_frame(u);
++            lv_nanovg_flush_pending(u);
+         }
+ 
+         cache_node_entry = lv_cache_acquire_or_create(u->image_cache, &search_key, NULL);
+--- a/src/draw/nanovg/lv_nanovg_utils.c
++++ b/src/draw/nanovg/lv_nanovg_utils.c
+@@ -267,6 +267,16 @@
+     LV_PROFILER_DRAW_END;
+ }
+ 
++void lv_nanovg_flush_pending(struct _lv_draw_nanovg_unit_t * u)
++{
++    LV_ASSERT_NULL(u);
++    bool is_started = u->is_started;
++    lv_nanovg_end_frame(u);
++    /* More commands will be queued by the same task. nvgBeginFrame would reset
++     * its transform and scissor, so preserve the existing frame instead. */
++    u->is_started = is_started;
++}
++
+ lv_draw_buf_t * lv_nanovg_reshape_global_image(struct _lv_draw_nanovg_unit_t * u,
+                                                lv_color_format_t cf,
+                                                uint32_t w,
+--- a/src/drivers/opengles/lv_opengles_driver.c
++++ b/src/drivers/opengles/lv_opengles_driver.c
+@@ -139,6 +139,9 @@
+ {
+     if(!is_init) return;
+ 
++#if LV_USE_DRAW_NANOVG
++    lv_draw_nanovg_reset();
++#endif
+     lv_opengles_shader_deinit();
+     lv_opengles_index_buffer_deinit();
+     lv_opengles_vertex_buffer_deinit();
+--- a/src/drivers/opengles/lv_opengles_egl.c
++++ b/src/drivers/opengles/lv_opengles_egl.c
+@@ -368,6 +368,11 @@
+     const EGLint config_attribs[] = {
+         EGL_RENDERABLE_TYPE,
+         EGL_OPENGL_ES2_BIT,
++#if LV_USE_DRAW_NANOVG
++        EGL_STENCIL_SIZE, 8,
++        EGL_SAMPLE_BUFFERS, 1,
++        EGL_SAMPLES, 4,
++#endif
+         EGL_NONE
+     };
+ 
+--- a/src/drivers/opengles/lv_opengles_texture.c
++++ b/src/drivers/opengles/lv_opengles_texture.c
+@@ -39,6 +39,9 @@
+ static unsigned int create_texture(int32_t w, int32_t h);
+ static void flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map);
+ static void release_disp_cb(lv_event_t * e);
++#if LV_USE_DRAW_NANOVG
++static void nanovg_refr_start_cb(lv_event_t * e);
++#endif
+ 
+ /**********************
+  *  STATIC VARIABLES
+@@ -88,6 +91,17 @@
+ {
+     LV_ASSERT_NULL(display);
+     LV_ASSERT_NULL(texture);
++#if LV_USE_DRAW_NANOVG
++    /* NanoVG draws to the EGL window; no CPU framebuffer or spare texture is needed. */
++    static size_t LV_ATTRIBUTE_MEM_ALIGN dummy_buf;
++    lv_display_set_buffers(display, &dummy_buf, NULL, width * height * 4, LV_DISPLAY_RENDER_MODE_FULL);
++    if(display->layer_head->user_data != texture) {
++        lv_display_add_event_cb(display, nanovg_refr_start_cb, LV_EVENT_REFR_START, NULL);
++    }
++    /* Marker used to keep the GPU draw unit away from software displays. */
++    display->layer_head->user_data = texture;
++    return LV_RESULT_OK;
++#endif
+     unsigned int new_texture = create_texture(width, height);
+     if(new_texture == GL_NONE) {
+         LV_LOG_ERROR("Failed to reshape texture. Couldn't acquire new texture from GPU");
+@@ -295,4 +309,19 @@
+     lv_free(texture);
+ }
+ 
++#if LV_USE_DRAW_NANOVG
++static void nanovg_refr_start_cb(lv_event_t * e)
++{
++    LV_UNUSED(e);
++    /* Window contents are undefined after swapping. Clear once per refresh,
++     * not per NanoVG batch: cache pressure can split a refresh into batches. */
++    glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    glDisable(GL_SCISSOR_TEST);
++    glStencilMask(0xff);
++    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++    glClearColor(0, 0, 0, 0);
++    glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
++}
++#endif
++
+ #endif /*LV_USE_OPENGLES*/
+--- a/src/draw/nanovg/lv_draw_nanovg.h
++++ b/src/draw/nanovg/lv_draw_nanovg.h
+@@ -35,6 +35,10 @@
+  */
+ void lv_draw_nanovg_init(void);
+ 
++/* Release context-owned resources while retaining the registered draw unit.
++ * Call while its GL context is current, before destroying that context. */
++void lv_draw_nanovg_reset(void);
++
+ /**********************
+  *      MACROS
+  **********************/
+--- a/src/draw/nanovg/lv_nanovg_utils.h
++++ b/src/draw/nanovg/lv_nanovg_utils.h
+@@ -157,6 +157,10 @@
+  */
+ void lv_nanovg_end_frame(struct _lv_draw_nanovg_unit_t * u);
+ 
++/** Flush commands and release their cache references without ending the current
++ * draw task's frame. Preserve its transform and clipping when caches fill. */
++void lv_nanovg_flush_pending(struct _lv_draw_nanovg_unit_t * u);
++
+ /**
+  * Clean up the NanoVG unit (e.g. at the end of task)
+  * @param u pointer to the nanovg unit

@@ -256,8 +256,13 @@ static void apply_display_orientation(lv_display_t *display,
                             landscape ? options->height : options->width,
                             landscape ? options->width : options->height);
 #else
-  lv_display_set_rotation(display, landscape ? LV_DISPLAY_ROTATION_90
-                                             : LV_DISPLAY_ROTATION_0);
+  // LVGL rotates rendered pixels counterclockwise, so 270 means clockwise 90.
+  const lv_display_rotation_t rotation = landscape ? LV_DISPLAY_ROTATION_270
+                                                   : LV_DISPLAY_ROTATION_0;
+  // Setting the same rotation still sends a resolution event in LVGL, which
+  // needlessly rebuilds the DRM/EGL display during portrait startup.
+  if (lv_display_get_rotation(display) != rotation)
+    lv_display_set_rotation(display, rotation);
 #endif
 }
 
@@ -338,6 +343,7 @@ static lv_display_t *create_display(const app_runtime_options_t *options,
 }
 
 int cm0_app_run(int argc, char **argv, const cm0_app_descriptor_t *descriptor) {
+  const uint32_t startup_started = tick_ms();
   app_runtime_options_t options{};
   if (parse_options(argc, argv, &options) != 0) {
     fprintf(stderr, "cm0-app: invalid runtime arguments\n");
@@ -353,6 +359,7 @@ int cm0_app_run(int argc, char **argv, const cm0_app_descriptor_t *descriptor) {
 
   app_exit_gesture_t exit_gesture{};
   AppDisplayRuntime runtime;
+  const uint32_t runtime_ready = tick_ms();
   lv_indev_t *input = NULL;
   lv_display_t *display = create_display(&options, &input);
   if (!display) {
@@ -361,6 +368,7 @@ int cm0_app_run(int argc, char **argv, const cm0_app_descriptor_t *descriptor) {
     return 1;
   }
   apply_display_orientation(display, &options);
+  const uint32_t display_ready = tick_ms();
   app_running = 1;
   display_alive = 1;
   runtime.set_display(display);
@@ -389,12 +397,22 @@ int cm0_app_run(int argc, char **argv, const cm0_app_descriptor_t *descriptor) {
     return 1;
   }
   AppSession session{*descriptor};
+  const uint32_t chrome_ready = tick_ms();
   session.open(context);
+  const uint32_t app_ready = tick_ms();
   lv_timer_t *exit_gesture_timer =
       input ? lv_timer_create(exit_gesture_timer_tick, 16, &exit_gesture)
             : NULL;
   lv_obj_invalidate(lv_screen_active());
   lv_refr_now(display);
+  const uint32_t frame_ready = tick_ms();
+  fprintf(stderr,
+          "[appkit] UI ready app_id=%s first_frame_ms=%u runtime_ms=%u "
+          "display_ms=%u chrome_ms=%u open_ms=%u render_ms=%u\n",
+          descriptor->id, frame_ready - startup_started,
+          runtime_ready - startup_started,
+          display_ready - runtime_ready, chrome_ready - display_ready,
+          app_ready - chrome_ready, frame_ready - app_ready);
 
   while (app_running) {
     uint32_t delay = lv_timer_handler();

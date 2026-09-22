@@ -8,9 +8,30 @@ include(CTest)
 include("${CMAKE_CURRENT_SOURCE_DIR}/CM0AppKit.cmake")
 _cm0_ensure_app_runtime()
 
+option(LILYGO_UI_BUILD_GRAPHICS_BENCHMARK
+    "Build the bounded LVGL graphics benchmark for device validation" OFF)
+if(LILYGO_UI_BUILD_GRAPHICS_BENCHMARK)
+    add_executable(lilygo-ui-graphics-benchmark tools/graphics-benchmark.cpp)
+    target_compile_features(lilygo-ui-graphics-benchmark PRIVATE cxx_std_17)
+    target_compile_options(lilygo-ui-graphics-benchmark PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(lilygo-ui-graphics-benchmark PRIVATE
+        LilyGoUI::LVGL LilyGoUI::UIFonts)
+endif()
+
 if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
+    # These tests compile the patched driver functions with device mocks, so
+    # both production and experimental backends remain covered on the host.
+    foreach(_driver_test IN ITEMS
+            drm_handoff evdev_sync drm_egl_lifecycle
+            nanovg_lifecycle nanovg_glyph_cache nanovg_pending)
+        string(REPLACE "_" "-" _driver_test_name "${_driver_test}")
+        add_test(NAME "lilygo-ui-${_driver_test_name}"
+            COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_${_driver_test}.sh"
+                "${_cm0_lvgl_source_dir}" "${CMAKE_C_COMPILER}")
+    endforeach()
     add_executable(cm0-appkit-system-status-tests
         tests/test_system_status.cpp)
+    target_compile_features(cm0-appkit-system-status-tests PRIVATE cxx_std_17)
     target_compile_options(cm0-appkit-system-status-tests PRIVATE
         -Wall -Wextra -Wpedantic -UNDEBUG)
     target_link_libraries(cm0-appkit-system-status-tests PRIVATE
@@ -48,10 +69,20 @@ install(FILES
 install(DIRECTORY config include patches third_party
         DESTINATION "${_appkit_cmake_dir}"
         COMPONENT appkit_dev)
+install(PROGRAMS tools/graphics-diagnostics.sh
+                 tools/run-graphics-comparison.py
+        DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/lilygo-ui-appkit"
+        COMPONENT appkit_dev)
+install(DIRECTORY docs/
+        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/lilygo-ui-appkit-dev"
+        COMPONENT appkit_dev)
 install(DIRECTORY assets
         DESTINATION "${_appkit_cmake_dir}"
         COMPONENT appkit_dev
         PATTERN "fonts" EXCLUDE)
+install(DIRECTORY assets/fonts/licenses
+        DESTINATION "${_appkit_cmake_dir}/assets/fonts"
+        COMPONENT appkit_dev)
 install(DIRECTORY src
         DESTINATION "${_appkit_cmake_dir}"
         COMPONENT appkit_dev
@@ -83,19 +114,24 @@ set(CPACK_PACKAGE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/dist")
 set(CPACK_PACKAGE_NAME "lilygo-ui-appkit-dev")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_CONTACT "LilyGo")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "LILYGO UI application SDK")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "LILYGO UI static source SDK and shared fonts")
 set(CPACK_DEB_COMPONENT_INSTALL ON)
 set(CPACK_COMPONENTS_ALL appkit_dev)
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
+set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE all)
 set(CPACK_DEBIAN_APPKIT_DEV_PACKAGE_NAME "lilygo-ui-appkit-dev")
 set(CPACK_DEBIAN_APPKIT_DEV_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_APPKIT_DEV_PACKAGE_ARCHITECTURE all)
 set(CPACK_DEBIAN_APPKIT_DEV_PACKAGE_DEPENDS
     "cmake, pkg-config, libdrm-dev, libfreetype6-dev")
+set(CPACK_DEBIAN_APPKIT_DEV_PACKAGE_RECOMMENDS
+    "libgbm-dev, libegl-dev, libgles-dev")
 set(CPACK_DEBIAN_APPKIT_DEV_PACKAGE_PROVIDES
-    "lilygo-cm0-appkit-dev (= ${PROJECT_VERSION}), lilygo-ui-fonts (= ${PROJECT_VERSION})")
+    "lilygo-cm0-appkit-dev (= ${PROJECT_VERSION}), lilygo-ui-fonts (= ${PROJECT_VERSION}), lilygo-ui-appkit-runtime (= ${PROJECT_VERSION})")
+# The source SDK now owns the common font files as well. Preserve package
+# migration relationships without providing the withdrawn dynamic ABI.
 set(CPACK_DEBIAN_APPKIT_DEV_PACKAGE_CONFLICTS
-    "lilygo-cm0-appkit-dev, lilygo-ui-fonts")
+    "lilygo-cm0-appkit-dev, lilygo-ui-fonts, lilygo-ui-appkit-runtime")
 set(CPACK_DEBIAN_APPKIT_DEV_PACKAGE_REPLACES
-    "lilygo-cm0-appkit-dev, lilygo-ui-fonts")
-set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
+    "lilygo-cm0-appkit-dev, lilygo-ui-fonts, lilygo-ui-appkit-runtime")
 include(CPack)

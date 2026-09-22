@@ -8,9 +8,10 @@ AppKit loads the bundled font files at runtime through LVGL's FreeType backend:
 
 Fonts returned by `lilygo_ui_font_get()` use Inter as the primary face, Source
 Han Sans SC as the Chinese fallback, and Font Awesome as the symbol fallback.
-Installed systems read them from `/usr/share/lilygo-ui/fonts`; source builds
-fall back to this directory. `LILYGO_UI_FONT_DIR` can override that location
-for tests.
+Installed systems read them from `/usr/share/lilygo-ui/fonts` (or the prefix
+selected when configuring AppKit). `LILYGO_UI_FONT_DIR` can override that
+location for tests. Development builds can fall back to this source assets
+directory; installed device applications load the shared runtime font files.
 
 Generation inputs used for this revision:
 
@@ -29,6 +30,10 @@ The runtime assets occupy 17,644,748 bytes. Most of that is the 16,414,944-byte
 Source Han Sans SC face. This is an intentional platform storage tradeoff: one
 shared `lilygo-ui-appkit-dev` package replaces per-application bitmap subsets and
 supports UI text that is not known at build time.
+
+With the version reset to 0.1.0, this architecture-independent package owns both the source
+SDK and the common font files. AppKit and LVGL are statically linked into each
+application; the package contains no AppKit/LVGL shared libraries.
 
 Keep `licenses/NOTICE.md` and `licenses/OFL-1.1.txt` with every distribution of
 the runtime fonts.

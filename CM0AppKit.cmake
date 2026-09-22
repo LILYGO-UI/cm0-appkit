@@ -11,6 +11,24 @@ else()
     set(_cm0_simulator_default ON)
 endif()
 option(CM0_SIMULATOR "Build with the SDL host display" ${_cm0_simulator_default})
+set(LILYGO_UI_RENDERER "software" CACHE STRING
+    "LVGL device renderer: software, opengles, or nanovg (experimental)")
+set_property(CACHE LILYGO_UI_RENDERER PROPERTY STRINGS software opengles nanovg)
+if(NOT LILYGO_UI_RENDERER MATCHES "^(software|opengles|nanovg)$")
+    message(FATAL_ERROR "LILYGO_UI_RENDERER must be software, opengles, or nanovg")
+endif()
+set(_lilygo_ui_gpu OFF)
+if(NOT LILYGO_UI_RENDERER STREQUAL "software")
+    set(_lilygo_ui_gpu ON)
+endif()
+if(CM0_SIMULATOR AND _lilygo_ui_gpu)
+    message(FATAL_ERROR
+        "The ${LILYGO_UI_RENDERER} renderer requires a Linux DRM device build (CM0_SIMULATOR=OFF)")
+endif()
+set(LILYGO_UI_GRAPHICS_DEBIAN_DEPENDS "")
+if(_lilygo_ui_gpu)
+    set(LILYGO_UI_GRAPHICS_DEBIAN_DEPENDS "libgbm1, libegl1, libgles2")
+endif()
 option(CM0_FETCH_LVGL
     "Download pinned LVGL only when neither an override nor the bundled source is available"
     OFF)
@@ -62,6 +80,17 @@ if(NOT TARGET lvgl)
         pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
     else()
         pkg_check_modules(DRM REQUIRED IMPORTED_TARGET libdrm)
+        if(_lilygo_ui_gpu)
+            pkg_check_modules(GRAPHICS QUIET IMPORTED_TARGET gbm egl glesv2)
+            if(NOT GRAPHICS_FOUND)
+                message(FATAL_ERROR
+                    "The ${LILYGO_UI_RENDERER} renderer requires gbm, egl and glesv2 in the target SDK. "
+                    "Install libgbm-dev, libegl-dev and libgles-dev on the target "
+                    "or include them in the cross-compilation sysroot. "
+                    "The pinned BSP 0.1.0 does not include these development files. "
+                    "Use LILYGO_UI_RENDERER=software for that SDK.")
+            endif()
+        endif()
     endif()
 
     if(CM0_LVGL_SOURCE_DIR)
@@ -108,12 +137,28 @@ if(NOT TARGET lvgl)
     endforeach()
     message(STATUS
         "LilyGoUI: using LVGL ${_cm0_lvgl_version} from ${_cm0_lvgl_provider}")
+    message(STATUS "LilyGoUI: renderer ${LILYGO_UI_RENDERER}")
+    target_compile_definitions(lvgl PUBLIC
+        LILYGO_UI_USE_OPENGLES=$<STREQUAL:${LILYGO_UI_RENDERER},opengles>
+        LILYGO_UI_USE_NANOVG=$<STREQUAL:${LILYGO_UI_RENDERER},nanovg>)
 
     if(NOT CM0_SIMULATOR)
         find_program(_cm0_patch_executable patch REQUIRED)
         set(_cm0_drm_patches
             "${_cm0_appkit_dir}/patches/lvgl-9.5.0-drm-recovery.patch"
-            "${_cm0_appkit_dir}/patches/lvgl-9.5.0-drm-software-rotation.patch")
+            "${_cm0_appkit_dir}/patches/lvgl-9.5.0-drm-software-rotation.patch"
+            "${_cm0_appkit_dir}/patches/lvgl-9.5.0-evdev-sync.patch")
+        if(_lilygo_ui_gpu)
+            list(APPEND _cm0_drm_patches
+                "${_cm0_appkit_dir}/patches/lvgl-9.5.0-drm-egl.patch"
+                "${_cm0_appkit_dir}/patches/lvgl-9.5.0-gles2-shaders.patch"
+                "${_cm0_appkit_dir}/patches/lvgl-9.5.0-drm-handoff.patch")
+            target_compile_definitions(lvgl PUBLIC LILYGO_UI_HAS_DRM_HANDOFF=1)
+        endif()
+        if(LILYGO_UI_RENDERER STREQUAL "nanovg")
+            list(APPEND _cm0_drm_patches
+                "${_cm0_appkit_dir}/patches/lvgl-9.5.0-nanovg-drm.patch")
+        endif()
         foreach(_cm0_drm_patch IN LISTS _cm0_drm_patches)
             execute_process(
                 COMMAND "${_cm0_patch_executable}" -p1 --forward --batch --dry-run
@@ -132,6 +177,18 @@ if(NOT TARGET lvgl)
                 if(NOT _cm0_patch_result EQUAL 0)
                     message(FATAL_ERROR
                         "Cannot apply CM0 LVGL DRM patch: ${_cm0_patch_error}")
+                endif()
+            else()
+                execute_process(
+                    COMMAND "${_cm0_patch_executable}" -p1 --reverse --force --dry-run
+                            --silent -i "${_cm0_drm_patch}"
+                    WORKING_DIRECTORY "${_cm0_lvgl_source_dir}"
+                    RESULT_VARIABLE _cm0_patch_reverse_result
+                    OUTPUT_QUIET ERROR_QUIET)
+                if(NOT _cm0_patch_reverse_result EQUAL 0)
+                    message(FATAL_ERROR
+                        "LVGL source is incompatible with ${_cm0_drm_patch}. "
+                        "Use a clean LVGL 9.5.0 source tree.")
                 endif()
             endif()
         endforeach()
@@ -152,7 +209,6 @@ if(NOT TARGET lvgl)
                     "CM0 LVGL DRM patches are not applied: missing '${_cm0_required_marker}'")
             endif()
         endforeach()
-
     endif()
 
     if(CM0_SIMULATOR)
@@ -173,6 +229,9 @@ if(NOT TARGET lvgl)
     else()
         target_link_libraries(lvgl PUBLIC
             PkgConfig::DRM ${_cm0_freetype_link_libraries})
+        if(_lilygo_ui_gpu)
+            target_link_libraries(lvgl PUBLIC PkgConfig::GRAPHICS ${CMAKE_DL_LIBS})
+        endif()
     endif()
 endif()
 
@@ -337,7 +396,11 @@ macro(lilygo_ui_enable_standalone_package app_slug)
         "${LILYGO_UI_VENDOR_SLUG}-ui-${_cm0_package_slug}")
     set(CPACK_DEBIAN_APP_FILE_NAME DEB-DEFAULT)
     set(CPACK_DEBIAN_APP_PACKAGE_DEPENDS
-        "libc6, libstdc++6, libdrm2, libfreetype6, lilygo-ui-appkit-dev")
+        "libc6, libstdc++6, libdrm2, libfreetype6, lilygo-ui-appkit-dev (>= 0.1.0)")
+    if(LILYGO_UI_GRAPHICS_DEBIAN_DEPENDS)
+        string(APPEND CPACK_DEBIAN_APP_PACKAGE_DEPENDS
+            ", ${LILYGO_UI_GRAPHICS_DEBIAN_DEPENDS}")
+    endif()
     set(CPACK_DEBIAN_APP_PACKAGE_PROVIDES
         "${CM0_VENDOR_SLUG}-cm0-${_cm0_package_slug} (= ${PROJECT_VERSION})")
     set(CPACK_DEBIAN_APP_PACKAGE_CONFLICTS
@@ -371,7 +434,11 @@ macro(cm0_enable_standalone_package app_slug)
         "${CM0_VENDOR_SLUG}-cm0-${_cm0_package_slug}")
     set(CPACK_DEBIAN_APP_FILE_NAME DEB-DEFAULT)
     set(CPACK_DEBIAN_APP_PACKAGE_DEPENDS
-        "libc6, libstdc++6, libdrm2, libfreetype6, lilygo-ui-appkit-dev")
+        "libc6, libstdc++6, libdrm2, libfreetype6, lilygo-ui-appkit-dev (>= 0.1.0)")
+    if(LILYGO_UI_GRAPHICS_DEBIAN_DEPENDS)
+        string(APPEND CPACK_DEBIAN_APP_PACKAGE_DEPENDS
+            ", ${LILYGO_UI_GRAPHICS_DEBIAN_DEPENDS}")
+    endif()
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
     if(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
         set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "arm64")

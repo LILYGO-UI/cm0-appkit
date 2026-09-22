@@ -1,0 +1,156 @@
+--- a/src/drivers/display/drm/lv_linux_drm.h
++++ b/src/drivers/display/drm/lv_linux_drm.h
+@@ -68,6 +68,25 @@
+  */
+ lv_result_t lv_linux_drm_set_file(lv_display_t * disp, const char * file, int64_t connector_id);
+ 
++#if LV_LINUX_DRM_USE_EGL
++/**
++ * Relinquish DRM master while preserving the current frame and GPU resources.
++ * The caller must stop display drawing before this call and keep it stopped
++ * until resume succeeds. Only initialized DRM/EGL displays with a presented
++ * frame are supported. Input devices should be closed separately.
++ * @return LV_RESULT_OK on handoff, LV_RESULT_INVALID on failure or if suspended
++ */
++lv_result_t lv_linux_drm_suspend(lv_display_t * disp);
++
++/**
++ * Reacquire DRM master and immediately present the retained frame.
++ * The original EGL context, buffers and draw caches remain valid. On failure
++ * the display stays suspended; the caller can destroy and recreate it.
++ * @return LV_RESULT_OK on resume, LV_RESULT_INVALID on failure or if not suspended
++ */
++lv_result_t lv_linux_drm_resume(lv_display_t * disp);
++#endif
++
+ /**
+  * @brief Automatically find a suitable DRM device path
+  *
+--- a/src/drivers/display/drm/lv_linux_drm_egl.c
++++ b/src/drivers/display/drm/lv_linux_drm_egl.c
+@@ -60,6 +60,7 @@
+ static drmModeEncoder * drm_get_encoder(lv_drm_ctx_t * ctx);
+ static drmModeCrtc * drm_get_crtc(lv_drm_ctx_t * ctx);
+ static void drm_on_page_flip(int fd, unsigned int frame, unsigned int sec, unsigned int usec, void * data);
++static int drm_do_page_flip(lv_drm_ctx_t * ctx, int timeout_ms);
+ static drm_fb_state_t * drm_fb_state_create(lv_drm_ctx_t * ctx, struct gbm_bo * bo);
+ static void drm_fb_state_destroy_cb(struct gbm_bo * bo, void * data);
+ static void drm_flip_cb(void * driver_data, bool vsync);
+@@ -141,6 +142,78 @@
+ 
+     lv_display_add_event_cb(ctx->display, event_cb, LV_EVENT_RESOLUTION_CHANGED, NULL);
+ 
++    return LV_RESULT_OK;
++}
++
++lv_result_t lv_linux_drm_suspend(lv_display_t * disp)
++{
++    if(!disp) return LV_RESULT_INVALID;
++    lv_drm_ctx_t * ctx = lv_display_get_driver_data(disp);
++    if(!ctx || ctx->fd < 0 || !ctx->egl_ctx || !ctx->gbm_surface ||
++       !ctx->drm_crtc || !ctx->drm_connector || !ctx->drm_encoder || !ctx->drm_mode ||
++       !ctx->crtc_isset || !ctx->gbm_bo_presented || ctx->suspended) return LV_RESULT_INVALID;
++
++    /* Complete the outstanding flip before changing master. Its event owns
++     * the transition from the previous front buffer to the retained one. */
++    uint32_t started = tick_cb();
++    while(ctx->gbm_bo_flipped) {
++        uint32_t elapsed = tick_cb() - started;
++        if(elapsed >= 1000 || drm_do_page_flip(ctx, (int)(1000 - elapsed)) <= 0) {
++            LV_LOG_ERROR("Failed to finish DRM page flip before handoff");
++            return LV_RESULT_INVALID;
++        }
++    }
++    if(ctx->gbm_bo_pending) {
++        gbm_surface_release_buffer(ctx->gbm_surface, ctx->gbm_bo_pending);
++        ctx->gbm_bo_pending = NULL;
++    }
++    if(drmDropMaster(ctx->fd) < 0) {
++        LV_LOG_ERROR("Failed to release DRM master: %s", strerror(errno));
++        return LV_RESULT_INVALID;
++    }
++    /* Keep the presented BO locked: the next client may save its FB as the
++     * CRTC to restore on exit. EGL and the original saved CRTC stay intact. */
++    ctx->suspended = true;
++    /* Suppress final CRTC restoration while another client owns master. */
++    ctx->crtc_isset = false;
++    return LV_RESULT_OK;
++}
++
++lv_result_t lv_linux_drm_resume(lv_display_t * disp)
++{
++    if(!disp) return LV_RESULT_INVALID;
++    lv_drm_ctx_t * ctx = lv_display_get_driver_data(disp);
++    if(!ctx || ctx->fd < 0 || !ctx->egl_ctx || !ctx->gbm_surface ||
++       !ctx->drm_crtc || !ctx->drm_connector || !ctx->drm_encoder || !ctx->drm_mode ||
++       ctx->crtc_isset || !ctx->gbm_bo_presented || !ctx->suspended ||
++       ctx->gbm_bo_flipped || ctx->gbm_bo_pending) return LV_RESULT_INVALID;
++
++    drm_fb_state_t * fb = gbm_bo_get_user_data(ctx->gbm_bo_presented);
++    if(!fb || !fb->fb_id || fb->fd != ctx->fd || fb->bo != ctx->gbm_bo_presented)
++        return LV_RESULT_INVALID;
++
++    int status = -1;
++    for(int attempt = 0; attempt < 100; ++attempt) {
++        status = drmSetMaster(ctx->fd);
++        if(status == 0 || (errno != EBUSY && errno != EACCES && errno != EPERM)) break;
++        if(attempt < 99) usleep(10000);
++    }
++    if(status < 0) {
++        LV_LOG_ERROR("Failed to reacquire DRM master: %s", strerror(errno));
++        return LV_RESULT_INVALID;
++    }
++    /* Another client may have changed the mode or CRTC. Bind our retained
++     * frame before allowing any new rendering or input processing. */
++    status = drmModeSetCrtc(ctx->fd, ctx->drm_encoder->crtc_id, fb->fb_id, 0, 0,
++                          &ctx->drm_connector->connector_id, 1, ctx->drm_mode);
++    if(status < 0) {
++        LV_LOG_ERROR("Failed to restore DRM scanout after handoff: %s", strerror(errno));
++        if(drmDropMaster(ctx->fd) < 0)
++            LV_LOG_ERROR("Failed to release DRM master after resume failure: %s", strerror(errno));
++        return LV_RESULT_INVALID;
++    }
++    ctx->suspended = false;
++    ctx->crtc_isset = true;
+     return LV_RESULT_OK;
+ }
+ 
+@@ -216,9 +289,13 @@
+ {
+     LV_UNUSED(area);
+     LV_UNUSED(px_map);
++    lv_drm_ctx_t * ctx = lv_display_get_driver_data(disp);
++    if(ctx->suspended) {
++        lv_display_flush_ready(disp);
++        return;
++    }
+     if(lv_display_flush_is_last(disp)) {
+         set_viewport(disp);
+-        lv_drm_ctx_t * ctx = lv_display_get_driver_data(disp);
+ #if LV_USE_DRAW_OPENGLES
+         lv_opengles_render_display_texture(disp, false, true);
+ #endif /*LV_USE_DRAW_OPENGLES*/
+@@ -233,8 +310,12 @@
+ {
+     LV_UNUSED(px_map);
+     LV_UNUSED(area);
++    lv_drm_ctx_t * ctx = lv_display_get_driver_data(disp);
++    if(ctx->suspended) {
++        lv_display_flush_ready(disp);
++        return;
++    }
+     if(lv_display_flush_is_last(disp)) {
+-        lv_drm_ctx_t * ctx = lv_display_get_driver_data(disp);
+         int32_t disp_width = lv_display_get_horizontal_resolution(disp);
+         int32_t disp_height = lv_display_get_vertical_resolution(disp);
+ 
+--- a/src/drivers/display/drm/lv_linux_drm_egl_private.h
++++ b/src/drivers/display/drm/lv_linux_drm_egl_private.h
+@@ -55,6 +55,7 @@
+     int fd;
+     int64_t connector_id;
+     bool crtc_isset;
++    bool suspended;
+ } lv_drm_ctx_t;
+ 
+ 

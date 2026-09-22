@@ -1,0 +1,9 @@
+schema_version = 1
+
+# AppKit is a static source SDK; its dev package also owns shared font assets.
+# CMakeLists.txt owns the SDK package identity and version.
+# LPM's [project] metadata describes Launcher applications and is not used here.
+[build]
+host_preset = "host-simulator"
+cross_preset = "cm0-cross"
+package_dir = "dist"

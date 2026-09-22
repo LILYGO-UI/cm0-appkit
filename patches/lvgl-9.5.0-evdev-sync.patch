@@ -1,0 +1,44 @@
+--- a/src/drivers/evdev/lv_evdev.c
++++ b/src/drivers/evdev/lv_evdev.c
+@@ -164,7 +164,13 @@
+     /*Update dsc with buffered events*/
+     struct input_event in = { 0 };
+     ssize_t br;
+-    while((br = read(dsc->fd, &in, sizeof(in))) > 0) {
++    data->continue_reading = false;
++    while(true) {
++        do {
++            br = read(dsc->fd, &in, sizeof(in));
++        } while(br == -1 && errno == EINTR);
++        /* A partial input_event must never be interpreted as a complete sample. */
++        if(br != (ssize_t)sizeof(in)) break;
+         if(in.type == EV_REL) {
+             if(in.code == REL_X) dsc->root_x += in.value;
+             else if(in.code == REL_Y) dsc->root_y += in.value;
+@@ -249,8 +255,8 @@
+                 }
+             }
+         }
++        else if(in.type == EV_SYN && in.code == SYN_REPORT) {
+ #if LV_USE_GESTURE_RECOGNITION
+-        else if(in.type == EV_SYN && in.code == SYN_REPORT) {
+             /* Handle gesture recognition at sync event */
+             if(dsc->touch_count > 0 && dsc->touch_data_changed) {
+                 LV_LOG_TRACE("=== SYN_REPORT: touch_count=%d ===", dsc->touch_count);
+@@ -303,8 +309,14 @@
+ 
+                 dsc->touch_data_changed = false;
+             }
+-        }
+-#endif
++#endif
++            if(lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
++                /* Deliver each complete sample before reading the next one.
++                 * Otherwise a queued press and release collapse into a release. */
++                data->continue_reading = true;
++                break;
++            }
++        }
+     }
+ 
+     if(!dsc->deleting && br == -1 && errno != EAGAIN) {
