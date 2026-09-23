@@ -53,7 +53,7 @@
  
  #if LV_USE_LINUX_DRM_GBM_BUFFERS
          struct dma_buf_sync sync_req;
-@@ -230,12 +241,23 @@
+@@ -230,12 +241,29 @@
  
      size_t buf_size = LV_MIN(drm_dev->drm_bufs[1].size, drm_dev->drm_bufs[0].size);
      uint32_t stride = drm_dev->drm_bufs[0].pitch;
@@ -64,9 +64,15 @@
 +    lv_color_format_t color_format = lv_display_get_color_format(disp);
 +    drm_dev->render_buf_size =
 +        (size_t)lv_draw_buf_width_to_stride(hor_res, color_format) * ver_res;
-+    drm_dev->render_buf = lv_malloc(drm_dev->render_buf_size);
-+    if(!drm_dev->render_buf) {
-+        LV_LOG_ERROR("DRM render buffer allocation failed");
++    /* Keep the full-screen rotation scratch outside LVGL's bounded heap.
++     * Recreated displays must not require one large contiguous TLSF block
++     * between long-lived font and image cache allocations. Anonymous pages
++     * are only committed when rotation actually writes to this buffer. */
++    drm_dev->render_buf = mmap(NULL, drm_dev->render_buf_size, PROT_READ | PROT_WRITE,
++                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    if(drm_dev->render_buf == MAP_FAILED) {
++        drm_dev->render_buf = NULL;
++        LV_LOG_ERROR("DRM render buffer mapping failed: %s", strerror(errno));
 +        return LV_RESULT_INVALID;
 +    }
 +
@@ -80,7 +86,7 @@
  
  
      /* Set the handler that is called before a redraw occurs to set the active buffer/plane
-@@ -1089,11 +1111,21 @@
+@@ -1089,11 +1117,21 @@
      if(!lv_display_flush_is_last(disp)) return;
  
      LV_UNUSED(area);
@@ -103,7 +109,7 @@
      if(drm_dmabuf_set_plane(drm_dev, drm_dev->act_buf)) {
          LV_LOG_ERROR("Flush fail");
          return;
-@@ -1103,6 +1135,25 @@
+@@ -1103,6 +1141,25 @@
  
  }
  
@@ -129,12 +135,12 @@
  static void drm_del_event_cb(lv_event_t * e)
  {
      if(LV_EVENT_DELETE != lv_event_get_code(e))
-@@ -1224,6 +1275,11 @@
+@@ -1224,6 +1281,11 @@
          drm_dev->fd = -1;
      }
  
 +    if(drm_dev->render_buf) {
-+        lv_free(drm_dev->render_buf);
++        munmap(drm_dev->render_buf, drm_dev->render_buf_size);
 +        drm_dev->render_buf = NULL;
 +    }
 +

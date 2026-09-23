@@ -22,7 +22,7 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
     # These tests compile the patched driver functions with device mocks, so
     # both production and experimental backends remain covered on the host.
     foreach(_driver_test IN ITEMS
-            drm_handoff evdev_sync drm_egl_lifecycle
+            drm_handoff evdev_sync drm_egl_lifecycle drm_software_buffer
             nanovg_lifecycle nanovg_glyph_cache nanovg_pending)
         string(REPLACE "_" "-" _driver_test_name "${_driver_test}")
         add_test(NAME "lilygo-ui-${_driver_test_name}"
