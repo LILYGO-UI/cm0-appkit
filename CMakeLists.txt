@@ -48,6 +48,20 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
         LilyGoUI::UIFonts)
     add_test(NAME cm0-appkit-typography
         COMMAND cm0-appkit-typography-tests)
+
+    add_executable(lilygo-ui-runtime-input-tests
+        tests/test_runtime_input.cpp)
+    target_compile_features(lilygo-ui-runtime-input-tests PRIVATE cxx_std_17)
+    target_compile_options(lilygo-ui-runtime-input-tests PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    target_link_libraries(lilygo-ui-runtime-input-tests PRIVATE
+        LilyGoUI::Runtime)
+    foreach(_input_test IN ITEMS controls focus scan-completion keyboard scroll enter)
+        add_test(NAME "lilygo-ui-runtime-input-${_input_test}"
+            COMMAND lilygo-ui-runtime-input-tests "${_input_test}")
+        set_tests_properties("lilygo-ui-runtime-input-${_input_test}"
+            PROPERTIES TIMEOUT 15)
+    endforeach()
 endif()
 
 set(_appkit_cmake_dir

@@ -14,12 +14,14 @@ trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 source_path=src/drivers/evdev/lv_evdev.c
 mkdir -p "$scratch/source/$(dirname "$source_path")"
 cp "$lvgl_source/$source_path" "$scratch/source/$source_path"
-patch_file="$test_dir/../patches/lvgl-9.5.0-evdev-sync.patch"
-if patch --batch --silent --forward --dry-run -p1 -d "$scratch/source" < "$patch_file" >/dev/null 2>&1; then
-    patch --batch --silent --forward -p1 -d "$scratch/source" < "$patch_file"
-else
-    patch --force --silent --reverse --dry-run -p1 -d "$scratch/source" < "$patch_file" >/dev/null
-fi
+for patch_name in evdev-sync keyboard; do
+    patch_file="$test_dir/../patches/lvgl-9.5.0-$patch_name.patch"
+    if patch --batch --silent --forward --dry-run -p1 -d "$scratch/source" < "$patch_file" >/dev/null 2>&1; then
+        patch --batch --silent --forward -p1 -d "$scratch/source" < "$patch_file"
+    else
+        patch --force --silent --reverse --dry-run -p1 -d "$scratch/source" < "$patch_file" >/dev/null
+    fi
+done
 
 # Compile the actual event reader with a deterministic nonblocking event queue.
 awk '

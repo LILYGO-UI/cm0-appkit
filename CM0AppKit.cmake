@@ -147,7 +147,8 @@ if(NOT TARGET lvgl)
         set(_cm0_drm_patches
             "${_cm0_appkit_dir}/patches/lvgl-9.5.0-drm-recovery.patch"
             "${_cm0_appkit_dir}/patches/lvgl-9.5.0-drm-software-rotation.patch"
-            "${_cm0_appkit_dir}/patches/lvgl-9.5.0-evdev-sync.patch")
+            "${_cm0_appkit_dir}/patches/lvgl-9.5.0-evdev-sync.patch"
+            "${_cm0_appkit_dir}/patches/lvgl-9.5.0-keyboard.patch")
         if(_lilygo_ui_gpu)
             list(APPEND _cm0_drm_patches
                 "${_cm0_appkit_dir}/patches/lvgl-9.5.0-drm-egl.patch"
@@ -309,12 +310,24 @@ function(_cm0_ensure_app_runtime)
     if(TARGET cm0_app_runtime)
         return()
     endif()
+    add_library(cm0_input STATIC "${_cm0_appkit_dir}/src/input.cpp")
+    target_include_directories(cm0_input PUBLIC
+        "${_cm0_appkit_dir}/include")
+    target_compile_features(cm0_input PUBLIC cxx_std_17)
+    target_compile_options(cm0_input PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(cm0_input PUBLIC lvgl)
+    if(CM0_SIMULATOR)
+        target_compile_definitions(cm0_input PRIVATE CM0_APP_SIMULATOR=1)
+    endif()
+    add_library(LilyGoCM0AppKit::Input ALIAS cm0_input)
+    add_library(LilyGoUI::Input ALIAS cm0_input)
+
     add_library(cm0_app_runtime STATIC "${_cm0_appkit_dir}/src/runtime.cpp")
     target_include_directories(cm0_app_runtime PUBLIC
         "${_cm0_appkit_dir}/include")
     target_compile_features(cm0_app_runtime PUBLIC cxx_std_17)
     target_compile_options(cm0_app_runtime PRIVATE -Wall -Wextra -Wpedantic)
-    target_link_libraries(cm0_app_runtime PUBLIC cm0_status_bar)
+    target_link_libraries(cm0_app_runtime PUBLIC cm0_status_bar cm0_input)
     if(CM0_SIMULATOR)
         target_compile_definitions(cm0_app_runtime PRIVATE CM0_APP_SIMULATOR=1)
     endif()

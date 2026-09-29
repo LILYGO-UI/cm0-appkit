@@ -61,7 +61,11 @@ static ssize_t mocked_read(int fd, void *buffer, size_t size) {
 }
 static void *lv_indev_get_driver_data(lv_indev_t *indev) { return indev->driver; }
 static int lv_indev_get_type(lv_indev_t *indev) { return indev->type; }
-static int _evdev_process_key(uint16_t code) { return code == KEY_ENTER ? 10 : 0; }
+static int _evdev_process_key(lv_evdev_t *driver, uint16_t code, int value) {
+    (void)driver;
+    (void)value;
+    return code == KEY_ENTER ? 10 : 0;
+}
 static lv_point_t _evdev_process_pointer(lv_indev_t *indev, int x, int y) {
     assert(indev->type == LV_INDEV_TYPE_POINTER);
     return (lv_point_t){x, y};

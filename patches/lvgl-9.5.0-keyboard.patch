@@ -1,0 +1,116 @@
+--- a/src/drivers/evdev/lv_evdev.c
++++ b/src/drivers/evdev/lv_evdev.c
+@@ -66,6 +66,8 @@
+     int root_x;
+     int root_y;
+     int key;
++    bool shift;
++    bool caps;
+     lv_indev_state_t state;
+     bool deleting;
+     /* Multi-touch support */
+@@ -91,9 +93,25 @@
+  *   STATIC FUNCTIONS
+  **********************/
+ 
+-static int _evdev_process_key(uint16_t code)
++static int _evdev_process_key(lv_evdev_t * dsc, uint16_t code, int value)
+ {
++    const bool pressed = value != 0;
+     switch(code) {
++        case KEY_LEFTSHIFT:
++        case KEY_RIGHTSHIFT:
++            dsc->shift = pressed;
++            return 0;
++        case KEY_CAPSLOCK:
++            if(value == 1) dsc->caps = !dsc->caps;
++            return 0;
++        case KEY_LEFTCTRL:
++        case KEY_RIGHTCTRL:
++        case KEY_LEFTALT:
++        case KEY_RIGHTALT:
++        case KEY_LEFTMETA:
++        case KEY_RIGHTMETA:
++        case KEY_FN:
++            return 0;
+         case KEY_UP:
+             return LV_KEY_UP;
+         case KEY_DOWN:
+@@ -119,6 +137,68 @@
+             return LV_KEY_HOME;
+         case KEY_END:
+             return LV_KEY_END;
++        case KEY_SPACE:
++            return ' ';
++        case KEY_A: case KEY_B: case KEY_C: case KEY_D: case KEY_E:
++        case KEY_F: case KEY_G: case KEY_H: case KEY_I: case KEY_J:
++        case KEY_K: case KEY_L: case KEY_M: case KEY_N: case KEY_O:
++        case KEY_P: case KEY_Q: case KEY_R: case KEY_S: case KEY_T:
++        case KEY_U: case KEY_V: case KEY_W: case KEY_X: case KEY_Y:
++        case KEY_Z: {
++            static const char letters[] = "abcdefghijklmnopqrstuvwxyz";
++            static const uint16_t codes[] = {
++                KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H,
++                KEY_I, KEY_J, KEY_K, KEY_L, KEY_M, KEY_N, KEY_O, KEY_P,
++                KEY_Q, KEY_R, KEY_S, KEY_T, KEY_U, KEY_V, KEY_W, KEY_X,
++                KEY_Y, KEY_Z
++            };
++            for(size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i) {
++                if(codes[i] == code) {
++                    int character = letters[i];
++                    if(dsc->shift != dsc->caps) character -= 'a' - 'A';
++                    return character;
++                }
++            }
++            return 0;
++        }
++        case KEY_1: case KEY_2: case KEY_3: case KEY_4: case KEY_5:
++        case KEY_6: case KEY_7: case KEY_8: case KEY_9: {
++            static const char normal[] = "123456789";
++            static const char shifted[] = "!@#$%^&*(";
++            static const uint16_t codes[] = {
++                KEY_1, KEY_2, KEY_3, KEY_4, KEY_5,
++                KEY_6, KEY_7, KEY_8, KEY_9
++            };
++            for(size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i) {
++                if(codes[i] == code)
++                    return dsc->shift ? shifted[i] : normal[i];
++            }
++            return 0;
++        }
++        case KEY_0:
++            return dsc->shift ? ')' : '0';
++        case KEY_MINUS:
++            return dsc->shift ? '_' : '-';
++        case KEY_EQUAL:
++            return dsc->shift ? '+' : '=';
++        case KEY_LEFTBRACE:
++            return dsc->shift ? '{' : '[';
++        case KEY_RIGHTBRACE:
++            return dsc->shift ? '}' : ']';
++        case KEY_BACKSLASH:
++            return dsc->shift ? '|' : '\\';
++        case KEY_SEMICOLON:
++            return dsc->shift ? ':' : ';';
++        case KEY_APOSTROPHE:
++            return dsc->shift ? '"' : '\'';
++        case KEY_GRAVE:
++            return dsc->shift ? '~' : '`';
++        case KEY_COMMA:
++            return dsc->shift ? '<' : ',';
++        case KEY_DOT:
++            return dsc->shift ? '>' : '.';
++        case KEY_SLASH:
++            return dsc->shift ? '?' : '/';
+         default:
+             return 0;
+     }
+@@ -241,7 +321,7 @@
+                 else if(in.value == 1) dsc->state = LV_INDEV_STATE_PRESSED;
+             }
+             else {
+-                dsc->key = _evdev_process_key(in.code);
++                dsc->key = _evdev_process_key(dsc, in.code, in.value);
+                 if(dsc->key) {
+                     dsc->state = in.value ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+                     data->continue_reading = true; /*Keep following events in buffer for now*/
