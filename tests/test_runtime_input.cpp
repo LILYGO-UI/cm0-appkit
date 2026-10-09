@@ -1,14 +1,41 @@
 // Exercise the private input callbacks against real LVGL objects. Including
 // the implementation keeps these details out of the public SDK API; the
 // runtime archive supplies its dependencies without extracting runtime.cpp.
+#include <cm0/input.h>
+
+static lv_indev_t *create_test_keyboard(bool *present);
+#define cm0_input_create_keyboard create_test_keyboard
 #include "../src/runtime.cpp"
+#undef cm0_input_create_keyboard
 
 #include <assert.h>
 #include <initializer_list>
 
+static bool keyboard_available = false;
+static unsigned keyboard_open_attempts = 0;
+static uint32_t keyboard_sample_key = LV_KEY_NEXT;
+static lv_indev_state_t keyboard_sample_state = LV_INDEV_STATE_RELEASED;
+
+static lv_indev_t *make_test_keyboard() {
+  lv_indev_t *keyboard = lv_indev_create();
+  assert(keyboard);
+  lv_indev_set_type(keyboard, LV_INDEV_TYPE_KEYPAD);
+  lv_indev_set_read_cb(keyboard, [](lv_indev_t *, lv_indev_data_t *data) {
+    data->key = keyboard_sample_key;
+    data->state = keyboard_sample_state;
+  });
+  return keyboard;
+}
+
+static lv_indev_t *create_test_keyboard(bool *present) {
+  ++keyboard_open_attempts;
+  *present = keyboard_available;
+  return keyboard_available ? make_test_keyboard() : nullptr;
+}
+
 class InputFixture {
  public:
-  InputFixture() {
+  explicit InputFixture(bool connected = true) {
     lv_init();
     display = lv_display_create(480, 640);
     assert(display);
@@ -20,13 +47,16 @@ class InputFixture {
     });
     group = lv_group_create();
     lv_group_set_default(group);
-    state = {nullptr, group, &running, true, false, false, false};
+    state.group = group;
+    state.running = &running;
+    if (connected) attach_keyboard(&state, make_test_keyboard(), true);
     timer = lv_timer_create(input_housekeeping, 50, &state);
     assert(timer);
   }
 
   ~InputFixture() {
     lv_timer_delete(timer);
+    if (state.keyboard) lv_indev_delete(state.keyboard);
     lv_group_set_default(nullptr);
     lv_group_delete(group);
     lv_display_delete(display);
@@ -247,17 +277,12 @@ static void verify_enter_submission() {
   lv_obj_add_event_cb(textarea, count_ready, LV_EVENT_READY, &textarea_ready);
 
   lv_indev_state_t sample_state = LV_INDEV_STATE_RELEASED;
-  lv_indev_t *indev = lv_indev_create();
-  lv_indev_set_type(indev, LV_INDEV_TYPE_KEYPAD);
-  lv_indev_set_group(indev, fixture.group);
+  lv_indev_t *indev = fixture.state.keyboard;
   lv_indev_set_user_data(indev, &sample_state);
   lv_indev_set_read_cb(indev, [](lv_indev_t *input, lv_indev_data_t *data) {
     data->key = LV_KEY_ENTER;
     data->state = *static_cast<lv_indev_state_t *>(lv_indev_get_user_data(input));
   });
-  fixture.state.keyboard = indev;
-  lv_indev_add_event_cb(indev, hardware_key_event, LV_EVENT_KEY, &fixture.state);
-
   lv_indev_read(indev);
   for (unsigned press = 1; press <= 2; ++press) {
     sample_state = LV_INDEV_STATE_PRESSED;
@@ -270,8 +295,84 @@ static void verify_enter_submission() {
     sample_state = LV_INDEV_STATE_RELEASED;
     lv_indev_read(indev);
   }
-  lv_indev_delete(indev);
-  fixture.state.keyboard = nullptr;
+}
+
+static void verify_keyboard_hotplug() {
+  InputFixture fixture(false);
+  lv_obj_t *first = lv_button_create(lv_screen_active());
+  lv_obj_t *second = lv_button_create(lv_screen_active());
+  lv_obj_t *textarea = lv_textarea_create(lv_screen_active());
+  lv_textarea_set_one_line(textarea, true);
+  lv_obj_t *software_keyboard = lv_keyboard_create(lv_layer_top());
+  lv_keyboard_set_textarea(software_keyboard, textarea);
+  unsigned ready = 0;
+  lv_obj_add_event_cb(software_keyboard, [](lv_event_t *event) {
+    ++*static_cast<unsigned *>(lv_event_get_user_data(event));
+  }, LV_EVENT_READY, &ready);
+
+  // Startup without a keyboard keeps its focus group and does not suppress
+  // software input. Absent-device scanning is bounded by the retry interval.
+  for (unsigned poll = 0; poll < 10; ++poll) {
+    lv_tick_inc(50);
+    input_housekeeping(fixture.timer);
+  }
+  assert(keyboard_open_attempts == 1);
+  assert(!fixture.state.keyboard);
+  assert(!fixture.state.hardware_keyboard);
+  assert(!lv_obj_has_flag(software_keyboard, LV_OBJ_FLAG_HIDDEN));
+
+  for (unsigned cycle = 0; cycle < 3; ++cycle) {
+    keyboard_available = true;
+    lv_tick_inc(kKeyboardScanInterval);
+    input_housekeeping(fixture.timer);
+    assert(fixture.state.keyboard);
+    assert(fixture.state.hardware_keyboard);
+    assert(lv_indev_get_group(fixture.state.keyboard) == fixture.group);
+    assert(!fixture.state.esc_pressed);
+    assert(!fixture.state.enter_pressed);
+    assert(!fixture.state.focus_suppressed);
+    assert(lv_obj_has_flag(software_keyboard, LV_OBJ_FLAG_HIDDEN));
+
+    // A replacement indev must have both normal focus navigation and the
+    // runtime's special Enter/ESC callbacks, not merely a readable event fd.
+    lv_group_focus_obj(first);
+    keyboard_sample_state = LV_INDEV_STATE_RELEASED;
+    lv_indev_read(fixture.state.keyboard);
+    keyboard_sample_key = LV_KEY_NEXT;
+    keyboard_sample_state = LV_INDEV_STATE_PRESSED;
+    lv_indev_read(fixture.state.keyboard);
+    assert(lv_group_get_focused(fixture.group) == second);
+    keyboard_sample_state = LV_INDEV_STATE_RELEASED;
+    lv_indev_read(fixture.state.keyboard);
+
+    lv_group_add_obj(fixture.group, textarea);
+    lv_group_focus_obj(textarea);
+    keyboard_sample_key = LV_KEY_ENTER;
+    keyboard_sample_state = LV_INDEV_STATE_PRESSED;
+    lv_indev_read(fixture.state.keyboard);
+    assert(ready == cycle + 1);
+    assert(fixture.state.enter_pressed);
+    keyboard_sample_key = LV_KEY_ESC;
+    lv_indev_read(fixture.state.keyboard);
+    assert(fixture.state.esc_pressed);
+    assert(fixture.state.focus_suppressed);
+    assert(fixture.running);
+
+    // Match evdev's deletion on ENODEV while keys were still held. Timer
+    // callbacks must stop using the old indev and accept a new one later.
+    lv_indev_delete(fixture.state.keyboard);
+    assert(!fixture.state.keyboard);
+    assert(!fixture.state.hardware_keyboard);
+    assert(!fixture.state.esc_pressed);
+    assert(!fixture.state.enter_pressed);
+    keyboard_available = false;
+    keyboard_sample_state = LV_INDEV_STATE_RELEASED;
+    lv_obj_remove_flag(software_keyboard, LV_OBJ_FLAG_HIDDEN);
+    lv_tick_inc(kKeyboardScanInterval);
+    input_housekeeping(fixture.timer);
+    assert(!fixture.state.keyboard);
+    assert(!lv_obj_has_flag(software_keyboard, LV_OBJ_FLAG_HIDDEN));
+  }
 }
 
 int main(int argc, char **argv) {
@@ -288,6 +389,8 @@ int main(int argc, char **argv) {
     verify_scroll_position();
   else if (strcmp(argv[1], "enter") == 0)
     verify_enter_submission();
+  else if (strcmp(argv[1], "hotplug") == 0)
+    verify_keyboard_hotplug();
   else
     return 2;
   return 0;

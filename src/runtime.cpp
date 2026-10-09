@@ -47,6 +47,7 @@ typedef struct app_input_state {
   bool focus_suppressed;
   bool esc_pressed;
   bool enter_pressed;
+  uint32_t keyboard_scan_at;
 } app_input_state_t;
 
 static constexpr int32_t kExitGestureMinStartZone = 48;
@@ -54,6 +55,7 @@ static constexpr int32_t kExitGestureMaxStartZone = 96;
 static constexpr int32_t kExitGestureMinDistance = 72;
 static constexpr int32_t kExitGestureMaxDistance = 120;
 static constexpr uint32_t kPageBackgroundColor = 0xf2f2f7;
+static constexpr uint32_t kKeyboardScanInterval = 500;
 
 static volatile sig_atomic_t app_running;
 static volatile sig_atomic_t display_alive;
@@ -260,6 +262,31 @@ static void hardware_key_event(lv_event_t *event) {
   lv_indev_stop_processing(state->keyboard);
 }
 
+static void keyboard_deleted(lv_event_t *event) {
+  auto *state = static_cast<app_input_state_t *>(lv_event_get_user_data(event));
+  if (!state || lv_event_get_target(event) != state->keyboard) return;
+  /* evdev deletes the old indev when a driver rebind removes its event node.
+   * Never retain that pointer or a held Enter/Esc across a reconnect. */
+  state->keyboard = nullptr;
+  state->hardware_keyboard = false;
+  state->esc_pressed = false;
+  state->enter_pressed = false;
+  state->keyboard_scan_at = lv_tick_get();
+}
+
+static void attach_keyboard(app_input_state_t *state, lv_indev_t *keyboard,
+                             bool hardware_keyboard) {
+  state->keyboard = keyboard;
+  state->hardware_keyboard = keyboard && hardware_keyboard;
+  state->esc_pressed = false;
+  state->enter_pressed = false;
+  if (!keyboard) return;
+  state->focus_suppressed = false;
+  lv_indev_set_group(keyboard, state->group);
+  lv_indev_add_event_cb(keyboard, hardware_key_event, LV_EVENT_KEY, state);
+  lv_indev_add_event_cb(keyboard, keyboard_deleted, LV_EVENT_DELETE, state);
+}
+
 static void pointer_focus_event(lv_event_t *event) {
   auto *state = static_cast<app_input_state_t *>(lv_event_get_user_data(event));
   if (!state || !state->group) return;
@@ -308,6 +335,13 @@ static void collect_focusable(lv_obj_t *object, lv_group_t *group,
 static void input_housekeeping(lv_timer_t *timer) {
   auto *state = static_cast<app_input_state_t *>(lv_timer_get_user_data(timer));
   if (!state || !state->group) return;
+  if (!state->keyboard &&
+      lv_tick_elaps(state->keyboard_scan_at) >= kKeyboardScanInterval) {
+    state->keyboard_scan_at = lv_tick_get();
+    bool present = false;
+    lv_indev_t *keyboard = cm0_input_create_keyboard(&present);
+    attach_keyboard(state, keyboard, present);
+  }
   if (!state->focus_suppressed) {
     collect_focusable(lv_screen_active(), state->group, state);
     collect_focusable(lv_layer_top(), state->group, state);
@@ -402,15 +436,9 @@ public:
   }
 
   void set_display(lv_display_t *display) { display_ = display; }
-  void set_inputs(lv_indev_t *input, lv_indev_t *keyboard) {
-    input_ = input;
-    keyboard_ = keyboard;
-  }
 
 private:
   lv_display_t *display_ = nullptr;
-  lv_indev_t *input_ = nullptr;
-  lv_indev_t *keyboard_ = nullptr;
 };
 
 class AppSession {
@@ -622,6 +650,9 @@ int cm0_app_run(int argc, char **argv, const cm0_app_descriptor_t *descriptor) {
   }
 
   app_exit_gesture_t exit_gesture{};
+  // Input deletion callbacks run from the runtime's lv_deinit(), so their
+  // state must outlive the runtime, including after a keyboard reconnect.
+  app_input_state_t input_state{};
   AppDisplayRuntime runtime;
   const uint32_t runtime_ready = tick_ms();
   lv_indev_t *input = NULL;
@@ -639,18 +670,17 @@ int cm0_app_run(int argc, char **argv, const cm0_app_descriptor_t *descriptor) {
   app_running = 1;
   display_alive = 1;
   runtime.set_display(display);
-  runtime.set_inputs(input, keyboard);
   lv_display_add_event_cb(display, display_deleted, LV_EVENT_DELETE, NULL);
   signal(SIGINT, stop_handler);
   signal(SIGTERM, stop_handler);
-  lv_group_t *input_group = keyboard ? lv_group_create() : nullptr;
+  // The default group and polling timer must exist even when the application
+  // starts with no keyboard; a later connection uses the same focus set.
+  lv_group_t *input_group = lv_group_create();
   if (input_group) lv_group_set_default(input_group);
-  if (keyboard) lv_indev_set_group(keyboard, input_group);
-  app_input_state_t input_state{keyboard, input_group, &app_running,
-                                keyboard_present, false, false, false};
-  if (keyboard)
-    lv_indev_add_event_cb(keyboard, hardware_key_event, LV_EVENT_KEY,
-                          &input_state);
+  input_state.group = input_group;
+  input_state.running = &app_running;
+  input_state.keyboard_scan_at = lv_tick_get();
+  attach_keyboard(&input_state, keyboard, keyboard_present);
   if (input && input_group)
     lv_indev_add_event_cb(input, pointer_focus_event, LV_EVENT_PRESSED,
                           &input_state);

@@ -56,7 +56,7 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
         -Wall -Wextra -Wpedantic -UNDEBUG)
     target_link_libraries(lilygo-ui-runtime-input-tests PRIVATE
         LilyGoUI::Runtime)
-    foreach(_input_test IN ITEMS controls focus scan-completion keyboard scroll enter)
+    foreach(_input_test IN ITEMS controls focus scan-completion keyboard scroll enter hotplug)
         add_test(NAME "lilygo-ui-runtime-input-${_input_test}"
             COMMAND lilygo-ui-runtime-input-tests "${_input_test}")
         set_tests_properties("lilygo-ui-runtime-input-${_input_test}"
