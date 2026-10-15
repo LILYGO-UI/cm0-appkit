@@ -1,26 +1,33 @@
 --- a/src/drivers/evdev/lv_evdev.c
 +++ b/src/drivers/evdev/lv_evdev.c
-@@ -66,6 +66,8 @@
+@@ -66,6 +66,11 @@
      int root_x;
      int root_y;
      int key;
-+    bool shift;
++    bool left_shift;
++    bool right_shift;
 +    bool caps;
++    uint16_t active_key_code;
++    int active_key;
      lv_indev_state_t state;
      bool deleting;
      /* Multi-touch support */
-@@ -91,9 +93,25 @@
+@@ -91,35 +96,158 @@
   *   STATIC FUNCTIONS
   **********************/
- 
 -static int _evdev_process_key(uint16_t code)
 +static int _evdev_process_key(lv_evdev_t * dsc, uint16_t code, int value)
  {
 +    const bool pressed = value != 0;
++    const bool shifted = dsc->left_shift || dsc->right_shift;
++    int key = 0;
++
      switch(code) {
 +        case KEY_LEFTSHIFT:
++            dsc->left_shift = pressed;
++            return 0;
 +        case KEY_RIGHTSHIFT:
-+            dsc->shift = pressed;
++            dsc->right_shift = pressed;
 +            return 0;
 +        case KEY_CAPSLOCK:
 +            if(value == 1) dsc->caps = !dsc->caps;
@@ -34,14 +41,57 @@
 +        case KEY_FN:
 +            return 0;
          case KEY_UP:
-             return LV_KEY_UP;
+-            return LV_KEY_UP;
++            key = LV_KEY_UP;
++            break;
          case KEY_DOWN:
-@@ -119,6 +137,68 @@
-             return LV_KEY_HOME;
+-            return LV_KEY_DOWN;
++            key = LV_KEY_DOWN;
++            break;
+         case KEY_RIGHT:
+-            return LV_KEY_RIGHT;
++            key = LV_KEY_RIGHT;
++            break;
+         case KEY_LEFT:
+-            return LV_KEY_LEFT;
++            key = LV_KEY_LEFT;
++            break;
+         case KEY_ESC:
+-            return LV_KEY_ESC;
++            key = LV_KEY_ESC;
++            break;
+         case KEY_DELETE:
+-            return LV_KEY_DEL;
++            key = LV_KEY_DEL;
++            break;
+         case KEY_BACKSPACE:
+-            return LV_KEY_BACKSPACE;
++            key = LV_KEY_BACKSPACE;
++            break;
+         case KEY_ENTER:
+-            return LV_KEY_ENTER;
++            key = LV_KEY_ENTER;
++            break;
+         case KEY_NEXT:
+         case KEY_TAB:
+-            return LV_KEY_NEXT;
++            key = shifted ? LV_KEY_PREV : LV_KEY_NEXT;
++            break;
+         case KEY_PREVIOUS:
+-            return LV_KEY_PREV;
++            key = LV_KEY_PREV;
++            break;
+         case KEY_HOME:
+-            return LV_KEY_HOME;
++            key = LV_KEY_HOME;
++            break;
          case KEY_END:
-             return LV_KEY_END;
+-            return LV_KEY_END;
++            key = LV_KEY_END;
++            break;
 +        case KEY_SPACE:
-+            return ' ';
++            key = ' ';
++            break;
 +        case KEY_A: case KEY_B: case KEY_C: case KEY_D: case KEY_E:
 +        case KEY_F: case KEY_G: case KEY_H: case KEY_I: case KEY_J:
 +        case KEY_K: case KEY_L: case KEY_M: case KEY_N: case KEY_O:
@@ -57,60 +107,92 @@
 +            };
 +            for(size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i) {
 +                if(codes[i] == code) {
-+                    int character = letters[i];
-+                    if(dsc->shift != dsc->caps) character -= 'a' - 'A';
-+                    return character;
++                    key = letters[i];
++                    if(shifted != dsc->caps) key -= 'a' - 'A';
++                    break;
 +                }
 +            }
-+            return 0;
++            break;
 +        }
 +        case KEY_1: case KEY_2: case KEY_3: case KEY_4: case KEY_5:
 +        case KEY_6: case KEY_7: case KEY_8: case KEY_9: {
 +            static const char normal[] = "123456789";
-+            static const char shifted[] = "!@#$%^&*(";
++            static const char shifted_chars[] = "!@#$%^&*(";
 +            static const uint16_t codes[] = {
 +                KEY_1, KEY_2, KEY_3, KEY_4, KEY_5,
 +                KEY_6, KEY_7, KEY_8, KEY_9
 +            };
 +            for(size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i) {
-+                if(codes[i] == code)
-+                    return dsc->shift ? shifted[i] : normal[i];
++                if(codes[i] == code) {
++                    key = shifted ? shifted_chars[i] : normal[i];
++                    break;
++                }
 +            }
-+            return 0;
++            break;
 +        }
 +        case KEY_0:
-+            return dsc->shift ? ')' : '0';
++            key = shifted ? ')' : '0';
++            break;
 +        case KEY_MINUS:
-+            return dsc->shift ? '_' : '-';
++            key = shifted ? '_' : '-';
++            break;
 +        case KEY_EQUAL:
-+            return dsc->shift ? '+' : '=';
++            key = shifted ? '+' : '=';
++            break;
 +        case KEY_LEFTBRACE:
-+            return dsc->shift ? '{' : '[';
++            key = shifted ? '{' : '[';
++            break;
 +        case KEY_RIGHTBRACE:
-+            return dsc->shift ? '}' : ']';
++            key = shifted ? '}' : ']';
++            break;
 +        case KEY_BACKSLASH:
-+            return dsc->shift ? '|' : '\\';
++            key = shifted ? '|' : '\\';
++            break;
 +        case KEY_SEMICOLON:
-+            return dsc->shift ? ':' : ';';
++            key = shifted ? ':' : ';';
++            break;
 +        case KEY_APOSTROPHE:
-+            return dsc->shift ? '"' : '\'';
++            key = shifted ? '"' : '\'';
++            break;
 +        case KEY_GRAVE:
-+            return dsc->shift ? '~' : '`';
++            key = shifted ? '~' : '`';
++            break;
 +        case KEY_COMMA:
-+            return dsc->shift ? '<' : ',';
++            key = shifted ? '<' : ',';
++            break;
 +        case KEY_DOT:
-+            return dsc->shift ? '>' : '.';
++            key = shifted ? '>' : '.';
++            break;
 +        case KEY_SLASH:
-+            return dsc->shift ? '?' : '/';
++            key = shifted ? '?' : '/';
++            break;
          default:
              return 0;
      }
-@@ -241,7 +321,7 @@
++
++    if(!key) return 0;
++    if(!pressed) {
++        if(dsc->active_key_code != code || !dsc->active_key) return 0;
++        key = dsc->active_key;
++        dsc->active_key_code = 0;
++        dsc->active_key = 0;
++    }
++    else if(value == 1) {
++        dsc->active_key_code = code;
++        dsc->active_key = key;
++    }
++    return key;
+ }
+ static int _evdev_calibrate(int v, int in_min, int in_max, int out_min, int out_max)
+@@ -241,8 +369,9 @@
                  else if(in.value == 1) dsc->state = LV_INDEV_STATE_PRESSED;
              }
              else {
 -                dsc->key = _evdev_process_key(in.code);
-+                dsc->key = _evdev_process_key(dsc, in.code, in.value);
-                 if(dsc->key) {
+-                if(dsc->key) {
++                int key = _evdev_process_key(dsc, in.code, in.value);
++                if(key) {
++                    dsc->key = key;
                      dsc->state = in.value ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
                      data->continue_reading = true; /*Keep following events in buffer for now*/
+                     break;

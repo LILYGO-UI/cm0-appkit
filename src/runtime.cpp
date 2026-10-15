@@ -1,6 +1,7 @@
 #include <cm0/app.h>
 #include <cm0/input.h>
 #include <cm0/status_bar.h>
+#include <src/misc/lv_event_private.h>
 
 #include <signal.h>
 #include <stdint.h>
@@ -42,6 +43,7 @@ typedef struct app_exit_gesture {
 typedef struct app_input_state {
   lv_indev_t *keyboard;
   lv_group_t *group;
+  lv_obj_t *scope;
   volatile sig_atomic_t *running;
   bool hardware_keyboard;
   bool focus_suppressed;
@@ -145,12 +147,156 @@ static bool object_hidden_in_tree(lv_obj_t *object) {
   return false;
 }
 
+static bool object_disabled_in_tree(lv_obj_t *object) {
+  for (lv_obj_t *current = object; current;
+       current = lv_obj_get_parent(current)) {
+    if (lv_obj_has_state(current, LV_STATE_DISABLED)) return true;
+  }
+  return false;
+}
+
+static void focus_scope_marker(lv_event_t *) {}
+
+extern "C" void cm0_input_set_focus_scope(lv_obj_t *object) {
+  if (object)
+    lv_obj_add_event_cb(object, focus_scope_marker, LV_EVENT_DELETE, nullptr);
+}
+
+static bool is_focus_scope(lv_obj_t *object) {
+  for (uint32_t i = 0; i < lv_obj_get_event_count(object); ++i)
+    if (lv_event_dsc_get_cb(lv_obj_get_event_dsc(object, i)) == focus_scope_marker)
+      return true;
+  return false;
+}
+
+static lv_obj_t *find_focus_scope(lv_obj_t *object) {
+  if (!object || object_hidden_in_tree(object)) return nullptr;
+  for (int32_t i = static_cast<int32_t>(lv_obj_get_child_count(object)) - 1;
+       i >= 0; --i) {
+    if (auto *scope = find_focus_scope(lv_obj_get_child(object, i))) return scope;
+  }
+  return is_focus_scope(object) ? object : nullptr;
+}
+
+static bool in_focus_scope(lv_obj_t *object, const app_input_state_t *state) {
+  if (!state->scope) return true;
+  for (lv_obj_t *current = object; current; current = lv_obj_get_parent(current))
+    if (current == state->scope) return true;
+  return false;
+}
+
+static void refresh_focus(app_input_state_t *state) {
+  state->scope = find_focus_scope(lv_layer_top());
+  if (!state->scope) state->scope = find_focus_scope(lv_screen_active());
+  collect_focusable(lv_screen_active(), state->group, state);
+  collect_focusable(lv_layer_top(), state->group, state);
+}
+
+static bool has_click_action(lv_obj_t *object) {
+  if (!lv_obj_has_flag(object, LV_OBJ_FLAG_CLICKABLE)) return false;
+  for (uint32_t i = 0; i < lv_obj_get_event_count(object); ++i) {
+    const auto code = lv_obj_get_event_dsc(object, i)->filter;
+    if (code == LV_EVENT_CLICKED || code == LV_EVENT_SHORT_CLICKED)
+      return true;
+  }
+  return false;
+}
+
+/* Draw after the children, inside the widget's bounds. An external outline is
+ * clipped by zero-padding lists and edge-to-edge photo grids; a normal border
+ * changes layout and can be covered by a canvas/image child. */
+static void draw_keyboard_focus(lv_event_t *event) {
+  auto *state = static_cast<app_input_state_t *>(lv_event_get_user_data(event));
+  lv_obj_t *object = lv_event_get_target_obj(event);
+  if (!state->keyboard || lv_group_get_focused(state->group) != object ||
+      !lv_obj_has_state(object, LV_STATE_FOCUSED) ||
+      object_disabled_in_tree(object))
+    return;
+  lv_area_t area;
+  lv_obj_get_coords(object, &area);
+  lv_draw_rect_dsc_t ring;
+  lv_draw_rect_dsc_init(&ring);
+  ring.bg_opa = LV_OPA_TRANSP;
+  ring.border_opa = LV_OPA_COVER;
+  ring.border_side = LV_BORDER_SIDE_FULL;
+  ring.border_width = 3;
+  ring.border_color = lv_color_hex(0x007aff);
+  ring.radius = lv_obj_get_style_radius(object, LV_PART_MAIN);
+  lv_draw_rect(lv_event_get_layer(event), &ring, &area);
+}
+
+static void navigate_keyboard_focus(lv_event_t *event) {
+  auto *state = static_cast<app_input_state_t *>(lv_event_get_user_data(event));
+  lv_obj_t *object = lv_event_get_target_obj(event);
+  const uint32_t key = lv_event_get_key(event);
+  const bool horizontal = key == LV_KEY_LEFT || key == LV_KEY_RIGHT;
+  if ((!horizontal && key != LV_KEY_UP && key != LV_KEY_DOWN) ||
+      lv_obj_is_editable(object) || lv_obj_has_flag(object, LV_OBJ_FLAG_CHECKABLE) ||
+      lv_group_get_focused(state->group) != object)
+    return;
+
+  lv_obj_update_layout(object);
+  lv_area_t origin;
+  lv_obj_get_coords(object, &origin);
+  const int32_t x = (origin.x1 + origin.x2) / 2;
+  const int32_t y = (origin.y1 + origin.y2) / 2;
+  const bool previous = key == LV_KEY_LEFT || key == LV_KEY_UP;
+  lv_obj_t *best = nullptr;
+  int64_t best_score = INT64_MAX;
+  for (uint32_t i = 0; i < lv_group_get_obj_count(state->group); ++i) {
+    lv_obj_t *candidate = lv_group_get_obj_by_index(state->group, i);
+    if (candidate == object || object_hidden_in_tree(candidate) ||
+        object_disabled_in_tree(candidate))
+      continue;
+    lv_area_t area;
+    lv_obj_get_coords(candidate, &area);
+    if (lv_area_get_width(&area) <= 0 || lv_area_get_height(&area) <= 0) continue;
+    const int32_t dx = (area.x1 + area.x2) / 2 - x;
+    const int32_t dy = (area.y1 + area.y2) / 2 - y;
+    const int32_t delta = horizontal ? dx : dy;
+    if (previous ? delta >= 0 : delta <= 0) continue;
+    const bool same_band = horizontal
+        ? origin.y1 <= area.y2 && area.y1 <= origin.y2
+        : origin.x1 <= area.x2 && area.x1 <= origin.x2;
+    // Prefer the same row/column, then distance. Tab always reaches the full
+    // group, including editors whose arrow keys retain their native meaning.
+    const int64_t primary = abs(delta);
+    const int64_t secondary = abs(horizontal ? dy : dx);
+    const int64_t score = (same_band ? 0 : INT64_C(1) << 50) +
+                          primary * primary + secondary * secondary;
+    if (score < best_score) {
+      best = candidate;
+      best_score = score;
+    }
+  }
+  if (best) {
+    lv_group_focus_obj(best);
+    lv_obj_scroll_to_view_recursive(best, LV_ANIM_OFF);
+  }
+}
+
+static void watch_navigation_object(lv_obj_t *object, app_input_state_t *state) {
+  bool custom_keys = false;
+  for (uint32_t i = 0; i < lv_obj_get_event_count(object); ++i) {
+    lv_event_dsc_t *descriptor = lv_obj_get_event_dsc(object, i);
+    if (lv_event_dsc_get_cb(descriptor) == draw_keyboard_focus) return;
+    if (descriptor->filter == LV_EVENT_KEY) custom_keys = true;
+  }
+  lv_obj_add_event_cb(object, draw_keyboard_focus, LV_EVENT_DRAW_POST, state);
+  lv_obj_add_flag(object, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+  if (!custom_keys)
+    lv_obj_add_event_cb(object, navigate_keyboard_focus, LV_EVENT_KEY, state);
+  // Replace the theme's clipped exterior outline without changing dimensions.
+  lv_obj_set_style_outline_opa(object, LV_OPA_TRANSP, LV_STATE_FOCUS_KEY);
+  lv_obj_set_style_outline_opa(object, LV_OPA_TRANSP, LV_STATE_FOCUSED);
+}
+
 static void focus_object_event(lv_event_t *event) {
   auto *state = static_cast<app_input_state_t *>(lv_event_get_user_data(event));
   lv_obj_t *object = lv_event_get_target_obj(event);
   if (!state || !state->group || !object || !lv_obj_is_editable(object) ||
       is_software_keyboard(object) || object_hidden_in_tree(object) ||
-      lv_obj_has_state(object, LV_STATE_DISABLED))
+      object_disabled_in_tree(object) || !in_focus_scope(object, state))
     return;
 
   state->focus_suppressed = false;
@@ -183,6 +329,8 @@ static void hardware_key_event(lv_event_t *event) {
   auto *state = static_cast<app_input_state_t *>(lv_event_get_user_data(event));
   if (!state || !state->keyboard || !state->running || !state->group)
     return;
+  // Games may temporarily detach the keypad or give it a private group.
+  if (lv_indev_get_group(state->keyboard) != state->group) return;
 
   const uint32_t key = lv_indev_get_key(state->keyboard);
   const lv_indev_state_t input_state = lv_indev_get_state(state->keyboard);
@@ -192,6 +340,7 @@ static void hardware_key_event(lv_event_t *event) {
     return;
   }
   if (input_state != LV_INDEV_STATE_PRESSED) return;
+  if (!state->focus_suppressed) refresh_focus(state);
 
   /* LVGL emits LV_EVENT_KEY repeatedly while a key is held. ESC changes the
    * group itself, so processing its repeat would immediately quit the app
@@ -210,10 +359,10 @@ static void hardware_key_event(lv_event_t *event) {
 
   if (state->focus_suppressed &&
       (key == LV_KEY_LEFT || key == LV_KEY_RIGHT || key == LV_KEY_UP ||
-       key == LV_KEY_DOWN || key == LV_KEY_ENTER)) {
+       key == LV_KEY_DOWN || key == LV_KEY_ENTER || key == LV_KEY_NEXT ||
+       key == LV_KEY_PREV)) {
     state->focus_suppressed = false;
-    collect_focusable(lv_screen_active(), state->group, state);
-    collect_focusable(lv_layer_top(), state->group, state);
+    refresh_focus(state);
   }
   if (key == LV_KEY_ENTER) {
     lv_obj_t *focused = lv_group_get_focused(state->group);
@@ -265,6 +414,11 @@ static void hardware_key_event(lv_event_t *event) {
 static void keyboard_deleted(lv_event_t *event) {
   auto *state = static_cast<app_input_state_t *>(lv_event_get_user_data(event));
   if (!state || lv_event_get_target(event) != state->keyboard) return;
+  // The runtime deletes its group before lv_deinit() deletes input devices.
+  // LVGL clears that indev association, while state->group may already be stale.
+  if (lv_group_t *group = lv_indev_get_group(state->keyboard)) {
+    if (lv_obj_t *focused = lv_group_get_focused(group)) lv_obj_invalidate(focused);
+  }
   /* evdev deletes the old indev when a driver rebind removes its event node.
    * Never retain that pointer or a held Enter/Esc across a reconnect. */
   state->keyboard = nullptr;
@@ -285,6 +439,8 @@ static void attach_keyboard(app_input_state_t *state, lv_indev_t *keyboard,
   lv_indev_set_group(keyboard, state->group);
   lv_indev_add_event_cb(keyboard, hardware_key_event, LV_EVENT_KEY, state);
   lv_indev_add_event_cb(keyboard, keyboard_deleted, LV_EVENT_DELETE, state);
+  if (lv_obj_t *focused = lv_group_get_focused(state->group))
+    lv_obj_invalidate(focused);
 }
 
 static void pointer_focus_event(lv_event_t *event) {
@@ -299,14 +455,15 @@ static void pointer_focus_event(lv_event_t *event) {
       !lv_obj_has_state(active, LV_STATE_DISABLED) &&
       lv_obj_get_group(active) != state->group)
     lv_group_add_obj(state->group, active);
-  collect_focusable(lv_screen_active(), state->group, state);
-  collect_focusable(lv_layer_top(), state->group, state);
+  refresh_focus(state);
 }
 
 static void collect_focusable(lv_obj_t *object, lv_group_t *group,
                               app_input_state_t *state) {
   if (!object || !group) return;
-  if (object_hidden_in_tree(object)) {
+  if (!in_focus_scope(object, state) && lv_obj_get_group(object) == group)
+    lv_group_remove_obj(object);
+  if (object_hidden_in_tree(object) || object_disabled_in_tree(object)) {
     if (lv_obj_get_group(object) == group) lv_group_remove_obj(object);
     const uint32_t hidden_children = lv_obj_get_child_count(object);
     for (uint32_t index = 0; index < hidden_children; ++index)
@@ -317,15 +474,21 @@ static void collect_focusable(lv_obj_t *object, lv_group_t *group,
   watch_editable_object(object, state);
   const bool editable = lv_obj_is_editable(object);
   const bool user_focused = lv_obj_has_state(object, LV_STATE_FOCUSED);
-  /* Group-def widgets (buttons, list items, etc.) are navigable from the
-   * hardware keyboard immediately. Text fields are added only after a
-   * pointer or app callback has focused them; otherwise the first text field
-   * would be focused implicitly when the group is populated at startup. */
-  if (!is_software_keyboard(object) &&
-      (lv_obj_is_group_def(object) || (editable && user_focused)) &&
-      !lv_obj_has_state(object, LV_STATE_DISABLED) &&
-      lv_obj_get_group(object) == nullptr)
-    lv_group_add_obj(group, object);
+  /* Standard widgets, including textareas, participate immediately. Custom
+   * editable objects can opt in by taking focus; clickable cards participate
+   * when they have an activation callback rather than merely container flags. */
+  const bool navigable = in_focus_scope(object, state) &&
+      !is_focus_scope(object) && !is_software_keyboard(object) &&
+      lv_obj_has_flag(object, LV_OBJ_FLAG_CLICKABLE) &&
+      (lv_obj_is_group_def(object) || (editable && user_focused) ||
+       has_click_action(object));
+  if (navigable) {
+    watch_navigation_object(object, state);
+    if (lv_obj_get_group(object) == nullptr) lv_group_add_obj(group, object);
+  } else if (!lv_obj_has_flag(object, LV_OBJ_FLAG_CLICKABLE) &&
+             lv_obj_is_group_def(object) && lv_obj_get_group(object) == group) {
+    lv_group_remove_obj(object);
+  }
   const uint32_t children = lv_obj_get_child_count(object);
   for (uint32_t index = 0; index < children; ++index)
     collect_focusable(lv_obj_get_child(object, static_cast<int32_t>(index)),
@@ -343,8 +506,7 @@ static void input_housekeeping(lv_timer_t *timer) {
     attach_keyboard(state, keyboard, present);
   }
   if (!state->focus_suppressed) {
-    collect_focusable(lv_screen_active(), state->group, state);
-    collect_focusable(lv_layer_top(), state->group, state);
+    refresh_focus(state);
   }
   if (!state->hardware_keyboard) return;
 

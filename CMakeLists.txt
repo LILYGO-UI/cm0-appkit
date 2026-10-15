@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(LilyGoUI VERSION 0.1.0 LANGUAGES C CXX)
+include(cmake/LpmMetadata.cmake)
+project(LilyGoUI VERSION "${LILYGO_UI_VERSION}" LANGUAGES C CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 include(CTest)
@@ -56,12 +57,16 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
         -Wall -Wextra -Wpedantic -UNDEBUG)
     target_link_libraries(lilygo-ui-runtime-input-tests PRIVATE
         LilyGoUI::Runtime)
-    foreach(_input_test IN ITEMS controls focus scan-completion keyboard scroll enter hotplug)
+    foreach(_input_test IN ITEMS controls focus scan-completion keyboard scroll enter hotplug navigation scope focus-ring)
         add_test(NAME "lilygo-ui-runtime-input-${_input_test}"
             COMMAND lilygo-ui-runtime-input-tests "${_input_test}")
         set_tests_properties("lilygo-ui-runtime-input-${_input_test}"
             PROPERTIES TIMEOUT 15)
     endforeach()
+    add_test(NAME lilygo-ui-keyboard-mapping
+        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_keyboard_mapping.sh"
+            "${_cm0_lvgl_source_dir}" "${CMAKE_C_COMPILER}")
+    set_tests_properties(lilygo-ui-keyboard-mapping PROPERTIES TIMEOUT 15)
 endif()
 
 set(_appkit_cmake_dir
@@ -126,7 +131,7 @@ install(FILES
 set(CPACK_GENERATOR DEB)
 set(CPACK_PACKAGE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/dist")
 set(CPACK_PACKAGE_NAME "lilygo-ui-appkit-dev")
-set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_VERSION "${LILYGO_UI_VERSION}")
 set(CPACK_PACKAGE_CONTACT "LilyGo")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "LILYGO UI static source SDK and shared fonts")
 set(CPACK_DEB_COMPONENT_INSTALL ON)
@@ -141,7 +146,7 @@ set(CPACK_DEBIAN_APPKIT_DEV_PACKAGE_DEPENDS
 set(CPACK_DEBIAN_APPKIT_DEV_PACKAGE_RECOMMENDS
     "libgbm-dev, libegl-dev, libgles-dev")
 set(CPACK_DEBIAN_APPKIT_DEV_PACKAGE_PROVIDES
-    "lilygo-cm0-appkit-dev (= ${PROJECT_VERSION}), lilygo-ui-fonts (= ${PROJECT_VERSION}), lilygo-ui-appkit-runtime (= ${PROJECT_VERSION})")
+    "lilygo-cm0-appkit-dev (= ${LILYGO_UI_VERSION}), lilygo-ui-fonts (= ${LILYGO_UI_VERSION}), lilygo-ui-appkit-runtime (= ${LILYGO_UI_VERSION})")
 # The source SDK now owns the common font files as well. Preserve package
 # migration relationships without providing the withdrawn dynamic ABI.
 set(CPACK_DEBIAN_APPKIT_DEV_PACKAGE_CONFLICTS

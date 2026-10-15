@@ -1,8 +1,37 @@
 schema_version = 1
 
-# AppKit is a static source SDK; its dev package also owns shared font assets.
-# CMakeLists.txt owns the SDK package identity and version.
-# LPM's [project] metadata describes Launcher applications and is not used here.
+[project]
+kind = "application"
+package = "lilygo-ui-appkit-dev"
+version = "0.1.1"
+app_id = "cc.lilygo.ui.AppKit"
+title = "LILYGO UI AppKit"
+summary = "Static LILYGO UI source SDK and shared fonts"
+description = "The LILYGO UI AppKit source SDK bundles LVGL, public headers, implementation sources, common fonts, patches, and font licenses for statically linked applications."
+license = "MIT AND OFL-1.1"
+source_repo = "https://github.com/LILYGO-UI/cm0-appkit"
+homepage = "https://github.com/LILYGO-UI/cm0-appkit"
+categories = ["Development"]
+permissions = []
+
+[[project.authors]]
+name = "LILYGO UI"
+github = "LILYGO-UI"
+
+[project.assets]
+icon = "assets/images/keyboard.png"
+
+[[project.assets.screenshots]]
+path = "assets/images/wifi_high.png"
+caption = "LILYGO UI AppKit status bar assets"
+
+[project.compatibility]
+architectures = ["all"]
+min_appkit_version = "0.1.0"
+
+[project.launcher]
+order = 0
+
 [build]
 host_preset = "host-simulator"
 cross_preset = "cm0-cross"

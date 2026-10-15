@@ -13,16 +13,22 @@ extern "C" {
  * input device and must delete it before deleting the display. */
 lv_indev_t *cm0_input_create_pointer(const char *path);
 
-/* Find the TCA8418 (or another full keyboard) event device.  On the SDL
- * simulator this creates the SDL keyboard device. */
+/* Find the canonical TCA8418 evdev keyboard. On the SDL simulator this
+ * creates the SDL keyboard device. Linux requires the event device name to
+ * identify TCA8418 and the standard navigation/text capability set. */
 lv_indev_t *cm0_input_create_keyboard(bool *present);
 
-/* True when a keyboard event node with alphabetic keys is available. */
+/* True when the canonical TCA8418 event node is available. */
 bool cm0_input_keyboard_present(void);
 
 /* True only for a Linux event-node keyboard (the TCA8418 on CM0).  This is
  * false for the SDL simulator's host keyboard. */
 bool cm0_input_hardware_keyboard_present(void);
+
+/* Confine runtime keyboard navigation to this subtree while it is visible.
+ * Use on modal overlays/full-screen detail views. Hide or delete the object
+ * to restore the enclosing focus scope. The frontmost visible scope wins. */
+void cm0_input_set_focus_scope(lv_obj_t *object);
 
 #ifdef __cplusplus
 }

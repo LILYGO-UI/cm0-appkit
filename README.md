@@ -39,13 +39,19 @@ require rebuilding and deploying the affected applications.
 
 ## AppKit development
 
-Install CMake, pkg-config, SDL2, and FreeType, then run in this repository:
+Install CMake, pkg-config, SDL2, FreeType, and LPM (`lilygo-lpm`), then run in
+this repository:
 
 ```sh
 cmake --preset host-simulator
 cmake --build --preset host-simulator --parallel
 ctest --preset host-simulator
 ```
+
+Standalone configuration uses `lpm metadata --format cmake` to read `lpm.toml`.
+Its `[project].version` sets the SDK and Debian package versions; update that
+field and run `lpm pack` to create a new package. CMake also tracks manifest
+changes and automatically reconfigures on the next build.
 
 The standalone SDK can also install its source CMake package for consumers that
 prefer a source SDK prefix:
@@ -180,3 +186,9 @@ documented storage budget. Device applications depend on the shared
 
 Original images, audio, fonts, and similar media belong under `assets/`.
 Generated LVGL C sources remain under `src/`.
+
+## Physical keyboard
+
+The TCA8418 keyboard input contract, including device boundaries, navigation,
+text entry, modal focus scopes, focus-ring rendering, and validation, is defined
+in [`docs/keyboard-input-contract.md`](docs/keyboard-input-contract.md).

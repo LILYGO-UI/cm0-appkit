@@ -75,6 +75,7 @@ int main() {
   make_directory(event);
   make_directory(input_device);
   make_directory(capabilities);
+  write_attribute(input_device, "name", "TCA8418 Keypad\n");
   write_attribute(wlan, "carrier", "0\n");
   write_attribute(wlan, "operstate", "down\n");
   write_attribute(battery, "type", "Battery\n");
@@ -96,11 +97,20 @@ int main() {
   write_attribute(wlan, "carrier", "1\n");
   write_attribute(battery, "capacity", "41\n");
   write_attribute(battery, "status", "Charging\n");
-  const unsigned long long keyboard_keys =
-      (1ULL << 28) | (1ULL << 30) | (1ULL << 44) | (1ULL << 57);
-  char keyboard_bitmap[32];
-  assert(snprintf(keyboard_bitmap, sizeof(keyboard_bitmap), "%llx\n",
-                  keyboard_keys) > 0);
+  char keyboard_bitmap[128] = {};
+  const unsigned keys[] = {1, 10, 11, 14, 15, 28, 30, 44, 57,
+                           102, 103, 105, 106, 107, 108, 111};
+  unsigned char nibbles[32] = {};
+  for (const unsigned key : keys) nibbles[key / 4] |= 1U << (key % 4);
+  char *cursor = keyboard_bitmap;
+  bool started = false;
+  for (int index = 31; index >= 0; --index) {
+    if (!started && nibbles[index] == 0) continue;
+    started = true;
+    *cursor++ = "0123456789abcdef"[nibbles[index] & 0xf];
+  }
+  *cursor++ = '\n';
+  *cursor = '\0';
   write_attribute(capabilities, "key", keyboard_bitmap);
   cm0_system_status_read_with_input(network, power, input, &status);
   assert(status.wifi_connected);

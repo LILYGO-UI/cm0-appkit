@@ -10,6 +10,9 @@ static lv_indev_t *create_test_keyboard(bool *present);
 
 #include <assert.h>
 #include <initializer_list>
+#include <algorithm>
+#include <vector>
+#include <fstream>
 
 static bool keyboard_available = false;
 static unsigned keyboard_open_attempts = 0;
@@ -375,6 +378,204 @@ static void verify_keyboard_hotplug() {
   }
 }
 
+static void press_key(InputFixture &fixture, uint32_t key) {
+  keyboard_sample_key = key;
+  keyboard_sample_state = LV_INDEV_STATE_PRESSED;
+  lv_indev_read(fixture.state.keyboard);
+  keyboard_sample_state = LV_INDEV_STATE_RELEASED;
+  lv_indev_read(fixture.state.keyboard);
+}
+
+static lv_obj_t *plain_control(lv_obj_t *parent, int x, int y) {
+  auto *button = lv_button_create(parent);
+  lv_obj_remove_style_all(button);
+  lv_obj_set_pos(button, x, y);
+  lv_obj_set_size(button, 80, 50);
+  return button;
+}
+
+static void verify_navigation() {
+  InputFixture fixture;
+  auto *first = plain_control(lv_screen_active(), 0, 0);
+  auto *right = plain_control(lv_screen_active(), 100, 0);
+  auto *down = plain_control(lv_screen_active(), 0, 80);
+  auto *field = lv_textarea_create(lv_screen_active());
+  lv_obj_set_pos(field, 0, 160);
+  lv_obj_set_size(field, 200, 50);
+  lv_textarea_set_one_line(field, true);
+  auto *card = lv_obj_create(lv_screen_active());
+  lv_obj_set_pos(card, 100, 80);
+  lv_obj_set_size(card, 80, 50);
+  unsigned clicks = 0;
+  lv_obj_add_event_cb(card, [](lv_event_t *event) {
+    ++*static_cast<unsigned *>(lv_event_get_user_data(event));
+  }, LV_EVENT_CLICKED, &clicks);
+  auto *decoration = lv_obj_create(lv_screen_active());
+  input_housekeeping(fixture.timer);
+  assert(!lv_obj_get_group(decoration));
+  assert(lv_obj_get_group(card) == fixture.group);
+  lv_group_focus_obj(first);
+  press_key(fixture, LV_KEY_RIGHT);
+  assert(lv_group_get_focused(fixture.group) == right);
+  press_key(fixture, LV_KEY_DOWN);
+  assert(lv_group_get_focused(fixture.group) == card);
+  press_key(fixture, LV_KEY_ENTER);
+  assert(clicks == 1);
+  press_key(fixture, LV_KEY_LEFT);
+  assert(lv_group_get_focused(fixture.group) == down);
+  press_key(fixture, LV_KEY_DOWN);
+  assert(lv_group_get_focused(fixture.group) == field);
+  press_key(fixture, 'a');
+  press_key(fixture, 'b');
+  press_key(fixture, LV_KEY_LEFT);
+  press_key(fixture, 'X');
+  assert(strcmp(lv_textarea_get_text(field), "aXb") == 0);
+  press_key(fixture, LV_KEY_BACKSPACE);
+  assert(strcmp(lv_textarea_get_text(field), "ab") == 0);
+  press_key(fixture, LV_KEY_NEXT);
+  assert(lv_group_get_focused(fixture.group) != field);
+  lv_group_focus_obj(field);
+  press_key(fixture, LV_KEY_ESC);
+  assert(fixture.running && fixture.state.focus_suppressed);
+  press_key(fixture, LV_KEY_NEXT);
+  assert(!fixture.state.focus_suppressed && lv_group_get_focused(fixture.group));
+
+  // Hide/disable entire pages: no descendant should remain keyboard reachable.
+  auto *disabled_page = lv_obj_create(lv_screen_active());
+  auto *disabled = plain_control(disabled_page, 0, 0);
+  lv_obj_add_state(disabled_page, LV_STATE_DISABLED);
+  input_housekeeping(fixture.timer);
+  assert(!lv_obj_get_group(disabled));
+  lv_obj_remove_state(disabled_page, LV_STATE_DISABLED);
+  input_housekeeping(fixture.timer);
+  assert(lv_obj_get_group(disabled) == fixture.group);
+  lv_obj_add_flag(disabled_page, LV_OBJ_FLAG_HIDDEN);
+  input_housekeeping(fixture.timer);
+  assert(!lv_obj_get_group(disabled));
+
+  // Tooltip callbacks listening to ALL events must not suppress navigation.
+  lv_obj_add_event_cb(first, [](lv_event_t *) {}, LV_EVENT_ALL, nullptr);
+  auto *hint_button = plain_control(lv_screen_active(), 400, 80);
+  lv_obj_add_event_cb(hint_button, [](lv_event_t *) {}, LV_EVENT_ALL, nullptr);
+  input_housekeeping(fixture.timer);
+  lv_group_focus_obj(hint_button);
+  press_key(fixture, LV_KEY_LEFT);
+  assert(lv_group_get_focused(fixture.group) != hint_button);
+
+  auto *read_only = plain_control(lv_screen_active(), 400, 160);
+  lv_obj_remove_flag(read_only, LV_OBJ_FLAG_CLICKABLE);
+  auto *toggle = lv_switch_create(lv_screen_active());
+  input_housekeeping(fixture.timer);
+  assert(!lv_obj_get_group(read_only));
+  lv_group_focus_obj(toggle);
+  press_key(fixture, LV_KEY_RIGHT);
+  assert(lv_obj_has_state(toggle, LV_STATE_CHECKED));
+  assert(lv_group_get_focused(fixture.group) == toggle);
+  press_key(fixture, LV_KEY_NEXT);
+  assert(lv_group_get_focused(fixture.group) != toggle);
+
+  // Existing application key handlers retain control of navigation.
+  auto *custom = plain_control(lv_screen_active(), 300, 0);
+  unsigned custom_keys = 0;
+  lv_obj_add_event_cb(custom, [](lv_event_t *event) {
+    ++*static_cast<unsigned *>(lv_event_get_user_data(event));
+  }, LV_EVENT_KEY, &custom_keys);
+  input_housekeeping(fixture.timer);
+  lv_group_focus_obj(custom);
+  press_key(fixture, LV_KEY_LEFT);
+  assert(custom_keys == 1 && lv_group_get_focused(fixture.group) == custom);
+}
+
+static void verify_modal_scope() {
+  InputFixture fixture;
+  auto *background = plain_control(lv_screen_active(), 0, 0);
+  auto *overlay = lv_obj_create(lv_screen_active());
+  cm0_input_set_focus_scope(overlay);
+  auto *cancel = plain_control(overlay, 0, 0);
+  auto *confirm = plain_control(overlay, 100, 0);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({cancel, confirm});
+  press_key(fixture, LV_KEY_NEXT);
+  press_key(fixture, LV_KEY_NEXT);
+  assert(lv_group_get_focused(fixture.group) != background);
+  auto *nested = lv_obj_create(overlay);
+  cm0_input_set_focus_scope(nested);
+  auto *close = plain_control(nested, 0, 0);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({close});
+  lv_obj_delete(nested);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({cancel, confirm});
+  lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({background});
+  lv_obj_remove_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({cancel, confirm});
+  lv_obj_delete(overlay);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({background});
+}
+
+static void verify_focus_ring() {
+  InputFixture fixture;
+  std::vector<lv_color32_t> frame;
+  lv_display_set_user_data(fixture.display, &frame);
+  lv_display_set_flush_cb(fixture.display, [](lv_display_t *display,
+                                              const lv_area_t *area, uint8_t *pixels) {
+    auto &frame = *static_cast<std::vector<lv_color32_t> *>(lv_display_get_user_data(display));
+    const int width = lv_display_get_horizontal_resolution(display);
+    auto *source = reinterpret_cast<lv_color32_t *>(pixels);
+    for (int y = area->y1; y <= area->y2; ++y)
+      std::copy_n(source + (y - area->y1) * lv_area_get_width(area),
+                  lv_area_get_width(area), frame.begin() + y * width + area->x1);
+    lv_display_flush_ready(display);
+  });
+  // A photo tile fills a zero-padding clipped parent and is covered by its
+  // opaque child. All four sides of the focus ring must still be drawn.
+  auto *clip = lv_obj_create(lv_screen_active());
+  lv_obj_remove_style_all(clip);
+  lv_obj_set_pos(clip, 20, 20);
+  lv_obj_set_size(clip, 100, 70);
+  auto *tile = plain_control(clip, 0, 0);
+  lv_obj_set_size(tile, 100, 70);
+  auto *photo = lv_obj_create(tile);
+  lv_obj_remove_style_all(photo);
+  lv_obj_set_size(photo, LV_PCT(100), LV_PCT(100));
+  lv_obj_set_style_bg_color(photo, lv_color_hex(0x20262d), 0);
+  lv_obj_set_style_bg_opa(photo, LV_OPA_COVER, 0);
+  input_housekeeping(fixture.timer);
+  lv_group_focus_obj(tile);
+  for (const auto size : {lv_point_t{320, 568}, lv_point_t{568, 1232},
+                          lv_point_t{1232, 568}, lv_point_t{1024, 768}}) {
+    lv_display_set_resolution(fixture.display, size.x, size.y);
+    frame.resize(size.x * size.y);
+    lv_obj_update_layout(clip);
+    lv_refr_now(fixture.display);
+    const auto blue = [&](int x, int y) {
+      const auto &pixel = frame[y * size.x + x];
+      return pixel.red == 0 && pixel.green == 0x7a && pixel.blue == 0xff;
+    };
+    for (int x = 20; x < 120; ++x) {
+      assert(blue(x, 20));
+      assert(blue(x, 89));
+    }
+    for (int y = 20; y < 90; ++y) {
+      assert(blue(20, y));
+      assert(blue(119, y));
+    }
+    assert(!blue(19, 50) && !blue(120, 50));
+    // Optional artifact used for visual inspection alongside pixel assertions.
+    if (const char *path = getenv("LILYGO_FOCUS_RING_PPM")) {
+      std::ofstream file(path, std::ios::binary);
+      file << "P6\n" << size.x << ' ' << size.y << "\n255\n";
+      for (const auto &pixel : frame) {
+        file.put(pixel.red); file.put(pixel.green); file.put(pixel.blue);
+      }
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   assert(argc == 2);
   if (strcmp(argv[1], "controls") == 0)
@@ -391,6 +592,12 @@ int main(int argc, char **argv) {
     verify_enter_submission();
   else if (strcmp(argv[1], "hotplug") == 0)
     verify_keyboard_hotplug();
+  else if (strcmp(argv[1], "navigation") == 0)
+    verify_navigation();
+  else if (strcmp(argv[1], "scope") == 0)
+    verify_modal_scope();
+  else if (strcmp(argv[1], "focus-ring") == 0)
+    verify_focus_ring();
   else
     return 2;
   return 0;

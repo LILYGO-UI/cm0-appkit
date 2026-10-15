@@ -6,8 +6,12 @@
 #include <unistd.h>
 
 #include <dirent.h>
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
 #if defined(CM0_APP_SIMULATOR)
 #include <src/drivers/sdl/lv_sdl_keyboard.h>
@@ -26,14 +30,35 @@ bool has_key(const unsigned long *bits, size_t count, unsigned int key)
     return word < count && (bits[word] & (1UL << bit)) != 0;
 }
 
-bool fd_is_keyboard(int fd)
+bool has_required_keyboard_keys(const unsigned long *bits, size_t count)
 {
+    return has_key(bits, count, KEY_ENTER) && has_key(bits, count, KEY_ESC) &&
+           has_key(bits, count, KEY_TAB) && has_key(bits, count, KEY_BACKSPACE) &&
+           has_key(bits, count, KEY_DELETE) && has_key(bits, count, KEY_UP) &&
+           has_key(bits, count, KEY_DOWN) && has_key(bits, count, KEY_LEFT) &&
+           has_key(bits, count, KEY_RIGHT) && has_key(bits, count, KEY_HOME) &&
+           has_key(bits, count, KEY_END) && has_key(bits, count, KEY_A) &&
+           has_key(bits, count, KEY_Z) && has_key(bits, count, KEY_0) &&
+           has_key(bits, count, KEY_9) && has_key(bits, count, KEY_SPACE);
+}
+
+bool tca8418_name(const char *name)
+{
+    if (!name) return false;
+    std::string folded(name);
+    for (char &character : folded)
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    return folded.find("tca8418") != std::string::npos;
+}
+
+bool fd_is_tca8418_keyboard(int fd)
+{
+    char name[256] = {};
+    if (ioctl(fd, EVIOCGNAME(sizeof(name)), name) < 0 || !tca8418_name(name))
+        return false;
     unsigned long bits[(KEY_MAX / (sizeof(unsigned long) * 8U)) + 1] = {};
     if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) < 0) return false;
-    return has_key(bits, sizeof(bits) / sizeof(bits[0]), KEY_ENTER) &&
-           has_key(bits, sizeof(bits) / sizeof(bits[0]), KEY_A) &&
-           has_key(bits, sizeof(bits) / sizeof(bits[0]), KEY_Z) &&
-           has_key(bits, sizeof(bits) / sizeof(bits[0]), KEY_SPACE);
+    return has_required_keyboard_keys(bits, sizeof(bits) / sizeof(bits[0]));
 }
 
 int open_keyboard_fd()
@@ -41,21 +66,27 @@ int open_keyboard_fd()
     DIR *dir = opendir("/dev/input");
     if (!dir) return -1;
 
-    int result = -1;
+    std::vector<std::string> event_nodes;
     struct dirent *entry;
     while ((entry = readdir(dir)) != nullptr) {
-        if (strncmp(entry->d_name, "event", 5) != 0) continue;
+        if (strncmp(entry->d_name, "event", 5) == 0)
+            event_nodes.emplace_back(entry->d_name);
+    }
+    closedir(dir);
+    std::sort(event_nodes.begin(), event_nodes.end());
+
+    int result = -1;
+    for (const std::string &event_node : event_nodes) {
         char path[128];
-        snprintf(path, sizeof(path), "/dev/input/%s", entry->d_name);
+        snprintf(path, sizeof(path), "/dev/input/%s", event_node.c_str());
         const int fd = open(path, O_RDONLY | O_NOCTTY | O_CLOEXEC);
         if (fd < 0) continue;
-        if (fd_is_keyboard(fd)) {
+        if (fd_is_tca8418_keyboard(fd)) {
             result = fd;
             break;
         }
         close(fd);
     }
-    closedir(dir);
     return result;
 }
 #endif
