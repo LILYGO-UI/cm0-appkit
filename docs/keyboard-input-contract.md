@@ -27,7 +27,12 @@ On Linux, AppKit accepts an event device only when both conditions hold:
 
 1. `EVIOCGNAME` contains `tca8418`, case-insensitively.
 2. The `EV_KEY` capability bitmap contains Enter, Escape, Tab, Backspace,
-   Delete, Up, Down, Left, Right, Home, End, A-Z, 0-9, and Space.
+   Up, Down, Left, Right, Space, and the representative text keys A, Z, 0, and 9.
+
+Delete, Home, and End are optional: the shipped T-DisplayCM0 device-tree
+matrix has none of these keys. AppKit maps them when a keymap provides them,
+but their absence must not reject the entire keyboard. The discovery check is
+a device capability guard, not a requirement to implement every decoded key.
 
 The same predicate is used for startup detection, hotplug reconnect, the
 hardware-keyboard status flag, and software-keyboard suppression. The SDL

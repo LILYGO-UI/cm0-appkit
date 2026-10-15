@@ -1,4 +1,5 @@
 #include <cm0/system_status.h>
+#include "keyboard_device.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -162,40 +163,15 @@ static bool key_bitmap_has(const char *bitmap, unsigned int key_code) {
 }
 
 static bool is_keyboard(const char *input_dir, const char *event_name) {
-  enum {
-    KEY_ESC = 1,
-    KEY_BACKSPACE = 14,
-    KEY_TAB = 15,
-    KEY_ENTER = 28,
-    KEY_A = 30,
-    KEY_Z = 44,
-    KEY_0 = 11,
-    KEY_9 = 10,
-    KEY_UP = 103,
-    KEY_DOWN = 108,
-    KEY_LEFT = 105,
-    KEY_RIGHT = 106,
-    KEY_HOME = 102,
-    KEY_END = 107,
-    KEY_DELETE = 111,
-    KEY_SPACE = 57,
-  };
   char name[128];
   char bitmap[2048];
   if (!read_text(input_dir, event_name, "device/name", name, sizeof(name)) ||
       !read_text(input_dir, event_name, "device/capabilities/key", bitmap,
                  sizeof(bitmap)))
     return false;
-  for (char *cursor = name; *cursor; ++cursor)
-    *cursor = static_cast<char>(tolower(static_cast<unsigned char>(*cursor)));
-  if (!strstr(name, "tca8418")) return false;
-  const unsigned int required[] = {
-      KEY_ESC, KEY_BACKSPACE, KEY_TAB, KEY_ENTER, KEY_A, KEY_Z, KEY_0, KEY_9,
-      KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_HOME, KEY_END, KEY_DELETE,
-      KEY_SPACE};
-  for (const unsigned int key : required)
-    if (!key_bitmap_has(bitmap, key)) return false;
-  return true;
+  return lilygo_input_detail::is_tca8418_keyboard(name, [&](unsigned int key) {
+    return key_bitmap_has(bitmap, key);
+  });
 }
 
 static void read_keyboard_status(const char *input_dir,

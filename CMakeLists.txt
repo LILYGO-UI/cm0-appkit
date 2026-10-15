@@ -40,6 +40,14 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
     add_test(NAME cm0-appkit-system-status
         COMMAND cm0-appkit-system-status-tests)
 
+    add_executable(lilygo-ui-keyboard-detection-tests
+        tests/test_keyboard_detection.cpp)
+    target_compile_features(lilygo-ui-keyboard-detection-tests PRIVATE cxx_std_17)
+    target_compile_options(lilygo-ui-keyboard-detection-tests PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME lilygo-ui-keyboard-detection
+        COMMAND lilygo-ui-keyboard-detection-tests)
+
     add_executable(cm0-appkit-typography-tests
         tests/test_typography.cpp)
     target_compile_features(cm0-appkit-typography-tests PRIVATE cxx_std_17)

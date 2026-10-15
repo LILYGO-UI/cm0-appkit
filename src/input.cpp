@@ -1,4 +1,5 @@
 #include <cm0/input.h>
+#include "keyboard_device.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -7,7 +8,6 @@
 
 #include <dirent.h>
 #include <algorithm>
-#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -30,35 +30,15 @@ bool has_key(const unsigned long *bits, size_t count, unsigned int key)
     return word < count && (bits[word] & (1UL << bit)) != 0;
 }
 
-bool has_required_keyboard_keys(const unsigned long *bits, size_t count)
-{
-    return has_key(bits, count, KEY_ENTER) && has_key(bits, count, KEY_ESC) &&
-           has_key(bits, count, KEY_TAB) && has_key(bits, count, KEY_BACKSPACE) &&
-           has_key(bits, count, KEY_DELETE) && has_key(bits, count, KEY_UP) &&
-           has_key(bits, count, KEY_DOWN) && has_key(bits, count, KEY_LEFT) &&
-           has_key(bits, count, KEY_RIGHT) && has_key(bits, count, KEY_HOME) &&
-           has_key(bits, count, KEY_END) && has_key(bits, count, KEY_A) &&
-           has_key(bits, count, KEY_Z) && has_key(bits, count, KEY_0) &&
-           has_key(bits, count, KEY_9) && has_key(bits, count, KEY_SPACE);
-}
-
-bool tca8418_name(const char *name)
-{
-    if (!name) return false;
-    std::string folded(name);
-    for (char &character : folded)
-        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-    return folded.find("tca8418") != std::string::npos;
-}
-
 bool fd_is_tca8418_keyboard(int fd)
 {
     char name[256] = {};
-    if (ioctl(fd, EVIOCGNAME(sizeof(name)), name) < 0 || !tca8418_name(name))
-        return false;
+    if (ioctl(fd, EVIOCGNAME(sizeof(name)), name) < 0) return false;
     unsigned long bits[(KEY_MAX / (sizeof(unsigned long) * 8U)) + 1] = {};
     if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) < 0) return false;
-    return has_required_keyboard_keys(bits, sizeof(bits) / sizeof(bits[0]));
+    return lilygo_input_detail::is_tca8418_keyboard(name, [&](unsigned int key) {
+        return has_key(bits, sizeof(bits) / sizeof(bits[0]), key);
+    });
 }
 
 int open_keyboard_fd()

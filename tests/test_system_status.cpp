@@ -97,26 +97,22 @@ int main() {
   write_attribute(wlan, "carrier", "1\n");
   write_attribute(battery, "capacity", "41\n");
   write_attribute(battery, "status", "Charging\n");
-  char keyboard_bitmap[128] = {};
-  const unsigned keys[] = {1, 10, 11, 14, 15, 28, 30, 44, 57,
-                           102, 103, 105, 106, 107, 108, 111};
-  unsigned char nibbles[32] = {};
-  for (const unsigned key : keys) nibbles[key / 4] |= 1U << (key % 4);
-  char *cursor = keyboard_bitmap;
-  bool started = false;
-  for (int index = 31; index >= 0; --index) {
-    if (!started && nibbles[index] == 0) continue;
-    started = true;
-    *cursor++ = "0123456789abcdef"[nibbles[index] & 0xf];
-  }
-  *cursor++ = '\n';
-  *cursor = '\0';
-  write_attribute(capabilities, "key", keyboard_bitmap);
+  // Actual T-DisplayCM0 tca8418 sysfs bitmap captured on 2026-10-15.
+  // Delete, Home, and End are absent from the shipped matrix.
+  write_attribute(capabilities, "key",
+                  "40 0 10000 0 0 0 0 0 200016800080001f ff07f47ff3ffcffe\n");
   cm0_system_status_read_with_input(network, power, input, &status);
   assert(status.wifi_connected);
   assert(status.keyboard_present);
   assert(status.battery_capacity == 41);
   assert(status.battery_charging);
+
+  write_attribute(input_device, "name", "USB Keyboard\n");
+  cm0_system_status_read_with_input(network, power, input, &status);
+  assert(!status.keyboard_present);
+  write_attribute(input_device, "name", "tca8418\n");
+  cm0_system_status_read_with_input(network, power, input, &status);
+  assert(status.keyboard_present);
 
   char interface_name[IFNAMSIZ];
   if (find_addressed_interface(interface_name, sizeof(interface_name))) {
