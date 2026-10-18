@@ -333,6 +333,7 @@ static void verify_keyboard_hotplug() {
     assert(lv_indev_get_group(fixture.state.keyboard) == fixture.group);
     assert(!fixture.state.esc_pressed);
     assert(!fixture.state.enter_pressed);
+    assert(!fixture.state.focus_visible);
     assert(!fixture.state.focus_suppressed);
     assert(lv_obj_has_flag(software_keyboard, LV_OBJ_FLAG_HIDDEN));
 
@@ -344,6 +345,7 @@ static void verify_keyboard_hotplug() {
     keyboard_sample_key = LV_KEY_NEXT;
     keyboard_sample_state = LV_INDEV_STATE_PRESSED;
     lv_indev_read(fixture.state.keyboard);
+    assert(fixture.state.focus_visible);
     assert(lv_group_get_focused(fixture.group) == second);
     keyboard_sample_state = LV_INDEV_STATE_RELEASED;
     lv_indev_read(fixture.state.keyboard);
@@ -392,6 +394,26 @@ static lv_obj_t *plain_control(lv_obj_t *parent, int x, int y) {
   lv_obj_set_pos(button, x, y);
   lv_obj_set_size(button, 80, 50);
   return button;
+}
+
+static void verify_focus_cleanup() {
+  InputFixture fixture;
+  auto *disabled = plain_control(lv_screen_active(), 0, 0);
+  auto *content = plain_control(lv_screen_active(), 100, 0);
+  auto *content_next = plain_control(lv_screen_active(), 200, 0);
+  auto *hidden = plain_control(lv_screen_active(), 300, 0);
+  auto *navigation = plain_control(lv_screen_active(), 400, 0);
+  lv_obj_add_state(disabled, LV_STATE_DISABLED);
+  lv_obj_add_flag(hidden, LV_OBJ_FLAG_HIDDEN);
+
+  input_housekeeping(fixture.timer);
+  // Removing the initially focused disabled control must preserve the first
+  // visible content control instead of wrapping focus to a later navigation
+  // item through LVGL's default PREV refocus policy.
+  assert(lv_group_get_focused(fixture.group) == content);
+  assert(lv_obj_get_group(navigation) == fixture.group);
+  press_key(fixture, LV_KEY_NEXT);
+  assert(lv_group_get_focused(fixture.group) == content_next);
 }
 
 static void verify_navigation() {
@@ -546,6 +568,8 @@ static void verify_focus_ring() {
   lv_obj_set_style_bg_opa(photo, LV_OPA_COVER, 0);
   input_housekeeping(fixture.timer);
   lv_group_focus_obj(tile);
+  assert(!fixture.state.focus_visible);
+  bool focus_activated = false;
   for (const auto size : {lv_point_t{320, 568}, lv_point_t{568, 1232},
                           lv_point_t{1232, 568}, lv_point_t{1024, 768}}) {
     lv_display_set_resolution(fixture.display, size.x, size.y);
@@ -556,6 +580,14 @@ static void verify_focus_ring() {
       const auto &pixel = frame[y * size.x + x];
       return pixel.red == 0 && pixel.green == 0x7a && pixel.blue == 0xff;
     };
+    if (!focus_activated) {
+      assert(!blue(20, 20));
+      assert(!blue(20, 50));
+      press_key(fixture, LV_KEY_NEXT);
+      assert(fixture.state.focus_visible);
+      lv_refr_now(fixture.display);
+      focus_activated = true;
+    }
     for (int x = 20; x < 120; ++x) {
       assert(blue(x, 20));
       assert(blue(x, 89));
@@ -594,6 +626,8 @@ int main(int argc, char **argv) {
     verify_keyboard_hotplug();
   else if (strcmp(argv[1], "navigation") == 0)
     verify_navigation();
+  else if (strcmp(argv[1], "focus-cleanup") == 0)
+    verify_focus_cleanup();
   else if (strcmp(argv[1], "scope") == 0)
     verify_modal_scope();
   else if (strcmp(argv[1], "focus-ring") == 0)

@@ -95,7 +95,8 @@ owned by the LVGL object and needs no separate cleanup.
 The runtime draws a three-pixel blue focus ring inside the focused control,
 after its children. The ring does not change layout, and photo or canvas
 children cannot cover it. There is no outside outline to be clipped at a list
-or grid boundary. No ring is drawn when the keyboard is absent.
+or grid boundary. The ring stays hidden until the user presses a key or
+touches a control, and it is also hidden when the keyboard is absent.
 
 ## Compatibility, verification, and rollout
 

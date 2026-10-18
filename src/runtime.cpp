@@ -47,6 +47,8 @@ typedef struct app_input_state {
   volatile sig_atomic_t *running;
   bool hardware_keyboard;
   bool focus_suppressed;
+  // Device presence alone must not expose a focus ring on the first frame.
+  bool focus_visible;
   bool esc_pressed;
   bool enter_pressed;
   uint32_t keyboard_scan_at;
@@ -185,11 +187,37 @@ static bool in_focus_scope(lv_obj_t *object, const app_input_state_t *state) {
   return false;
 }
 
+static bool focus_candidate(lv_obj_t *object, const app_input_state_t *state) {
+  return object && lv_obj_is_valid(object) && !object_hidden_in_tree(object) &&
+      !object_disabled_in_tree(object) && in_focus_scope(object, state);
+}
+
+static lv_obj_t *first_focus_candidate(const app_input_state_t *state) {
+  if (!state || !state->group) return nullptr;
+  for (uint32_t index = 0; index < lv_group_get_obj_count(state->group); ++index) {
+    lv_obj_t *object = lv_group_get_obj_by_index(state->group, index);
+    if (focus_candidate(object, state) && !is_software_keyboard(object))
+      return object;
+  }
+  return nullptr;
+}
+
 static void refresh_focus(app_input_state_t *state) {
   state->scope = find_focus_scope(lv_layer_top());
   if (!state->scope) state->scope = find_focus_scope(lv_screen_active());
+  // Removing a focused disabled/hidden object makes LVGL refocus using its
+  // PREV policy, which can wrap around to a bottom navigation item. Choose a
+  // visible fallback before pruning the group so that cleanup preserves order.
+  if (!focus_candidate(lv_group_get_focused(state->group), state)) {
+    if (lv_obj_t *fallback = first_focus_candidate(state))
+      lv_group_focus_obj(fallback);
+  }
   collect_focusable(lv_screen_active(), state->group, state);
   collect_focusable(lv_layer_top(), state->group, state);
+  if (!focus_candidate(lv_group_get_focused(state->group), state)) {
+    if (lv_obj_t *fallback = first_focus_candidate(state))
+      lv_group_focus_obj(fallback);
+  }
 }
 
 static bool has_click_action(lv_obj_t *object) {
@@ -208,7 +236,8 @@ static bool has_click_action(lv_obj_t *object) {
 static void draw_keyboard_focus(lv_event_t *event) {
   auto *state = static_cast<app_input_state_t *>(lv_event_get_user_data(event));
   lv_obj_t *object = lv_event_get_target_obj(event);
-  if (!state->keyboard || lv_group_get_focused(state->group) != object ||
+  if (!state->keyboard || !state->focus_visible ||
+      lv_group_get_focused(state->group) != object ||
       !lv_obj_has_state(object, LV_STATE_FOCUSED) ||
       object_disabled_in_tree(object))
     return;
@@ -340,6 +369,11 @@ static void hardware_key_event(lv_event_t *event) {
     return;
   }
   if (input_state != LV_INDEV_STATE_PRESSED) return;
+  if (!state->focus_visible) {
+    state->focus_visible = true;
+    if (lv_obj_t *focused = lv_group_get_focused(state->group))
+      lv_obj_invalidate(focused);
+  }
   if (!state->focus_suppressed) refresh_focus(state);
 
   /* LVGL emits LV_EVENT_KEY repeatedly while a key is held. ESC changes the
@@ -401,6 +435,7 @@ static void hardware_key_event(lv_event_t *event) {
      * so the user can choose a new field. */
     lv_group_remove_all_objs(state->group);
     state->focus_suppressed = true;
+    state->focus_visible = false;
   } else {
     /* LVGL's keypad path forwards LV_EVENT_KEY to the focused object after
      * the indev callback. Clear the group first so an application's focused
@@ -423,6 +458,7 @@ static void keyboard_deleted(lv_event_t *event) {
    * Never retain that pointer or a held Enter/Esc across a reconnect. */
   state->keyboard = nullptr;
   state->hardware_keyboard = false;
+  state->focus_visible = false;
   state->esc_pressed = false;
   state->enter_pressed = false;
   state->keyboard_scan_at = lv_tick_get();
@@ -432,6 +468,7 @@ static void attach_keyboard(app_input_state_t *state, lv_indev_t *keyboard,
                              bool hardware_keyboard) {
   state->keyboard = keyboard;
   state->hardware_keyboard = keyboard && hardware_keyboard;
+  state->focus_visible = false;
   state->esc_pressed = false;
   state->enter_pressed = false;
   if (!keyboard) return;
@@ -446,6 +483,7 @@ static void attach_keyboard(app_input_state_t *state, lv_indev_t *keyboard,
 static void pointer_focus_event(lv_event_t *event) {
   auto *state = static_cast<app_input_state_t *>(lv_event_get_user_data(event));
   if (!state || !state->group) return;
+  state->focus_visible = true;
   state->focus_suppressed = false;
   /* ESC deliberately removes all group members.  Re-add the object under the
    * pointer before LVGL performs its normal click-to-focus step, otherwise a
