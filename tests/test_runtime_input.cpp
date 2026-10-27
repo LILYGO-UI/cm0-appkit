@@ -487,12 +487,14 @@ static void verify_navigation() {
   auto *read_only = plain_control(lv_screen_active(), 400, 160);
   lv_obj_remove_flag(read_only, LV_OBJ_FLAG_CLICKABLE);
   auto *toggle = lv_switch_create(lv_screen_active());
+  lv_obj_set_pos(toggle, 0, 260);
   input_housekeeping(fixture.timer);
   assert(!lv_obj_get_group(read_only));
   lv_group_focus_obj(toggle);
   press_key(fixture, LV_KEY_RIGHT);
-  assert(lv_obj_has_state(toggle, LV_STATE_CHECKED));
-  assert(lv_group_get_focused(fixture.group) == toggle);
+  assert(!lv_obj_has_state(toggle, LV_STATE_CHECKED));
+  assert(lv_group_get_focused(fixture.group) != toggle);
+  lv_group_focus_obj(toggle);
   press_key(fixture, LV_KEY_NEXT);
   assert(lv_group_get_focused(fixture.group) != toggle);
 
@@ -506,6 +508,352 @@ static void verify_navigation() {
   lv_group_focus_obj(custom);
   press_key(fixture, LV_KEY_LEFT);
   assert(custom_keys == 1 && lv_group_get_focused(fixture.group) == custom);
+}
+
+static void verify_unmarked_scroll_navigation() {
+  InputFixture fixture;
+  const auto settle_scroll = [] {
+    for (unsigned step = 0; step < 30; ++step) {
+      lv_tick_inc(20);
+      lv_timer_handler();
+    }
+  };
+  auto *list = lv_obj_create(lv_screen_active());
+  lv_obj_remove_style_all(list);
+  lv_obj_set_size(list, 200, 100);
+  lv_obj_set_scroll_dir(list, LV_DIR_VER);
+  auto *first = plain_control(list, 0, 0);
+  auto *second = plain_control(list, 0, 140);
+  input_housekeeping(fixture.timer);
+  lv_group_focus_obj(first);
+
+  // Existing applications do not mark their lists as browsing regions. Keep
+  // their directional focus navigation and automatic reveal across viewports.
+  press_key(fixture, LV_KEY_DOWN);
+  assert(lv_group_get_focused(fixture.group) == second);
+  // Legacy lists reveal immediately so the next directional key is usable
+  // even before a timer tick or scroll animation has run.
+  assert(lv_obj_get_scroll_y(list) > 0);
+  settle_scroll();
+  assert(lv_obj_get_scroll_y(list) > 0);
+  lv_area_t viewport, bounds;
+  lv_obj_get_coords(list, &viewport);
+  lv_obj_get_coords(second, &bounds);
+  assert(bounds.y1 >= viewport.y1 && bounds.y2 <= viewport.y2);
+
+  press_key(fixture, LV_KEY_UP);
+  assert(lv_group_get_focused(fixture.group) == first);
+  assert(lv_obj_get_scroll_y(list) == 0);
+  settle_scroll();
+  assert(lv_obj_get_scroll_y(list) == 0);
+  lv_obj_get_coords(first, &bounds);
+  assert(bounds.y1 >= viewport.y1 && bounds.y2 <= viewport.y2);
+}
+
+static void verify_switch_keys() {
+  InputFixture fixture;
+  auto *toggle = lv_switch_create(lv_screen_active());
+  lv_obj_set_pos(toggle, 200, 200);
+  lv_obj_set_size(toggle, 48, 28);
+  auto *left = plain_control(lv_screen_active(), 60, 190);
+  auto *right = plain_control(lv_screen_active(), 320, 190);
+  auto *up = plain_control(lv_screen_active(), 184, 80);
+  auto *down = plain_control(lv_screen_active(), 184, 300);
+  unsigned changes = 0;
+  lv_obj_add_event_cb(toggle, [](lv_event_t *event) {
+    ++*static_cast<unsigned *>(lv_event_get_user_data(event));
+  }, LV_EVENT_VALUE_CHANGED, &changes);
+  input_housekeeping(fixture.timer);
+  const uint32_t arrows[]{LV_KEY_LEFT, LV_KEY_RIGHT, LV_KEY_UP, LV_KEY_DOWN};
+  lv_obj_t *neighbors[]{left, right, up, down};
+  for (const bool checked : {false, true}) {
+    lv_obj_set_state(toggle, LV_STATE_CHECKED, checked);
+    for (unsigned i = 0; i < 4; ++i) {
+      lv_group_focus_obj(toggle);
+      press_key(fixture, arrows[i]);
+      assert(lv_group_get_focused(fixture.group) == neighbors[i]);
+      assert(lv_obj_has_state(toggle, LV_STATE_CHECKED) == checked);
+      assert(changes == 0);
+    }
+  }
+  for (auto *neighbor : neighbors) lv_obj_add_flag(neighbor, LV_OBJ_FLAG_HIDDEN);
+  input_housekeeping(fixture.timer);
+  lv_group_focus_obj(toggle);
+  // Even at a navigation boundary, arrows must never change the value.
+  for (const bool checked : {false, true}) {
+    lv_obj_set_state(toggle, LV_STATE_CHECKED, checked);
+    for (const auto key : arrows) {
+      press_key(fixture, key);
+      assert(lv_group_get_focused(fixture.group) == toggle);
+      assert(lv_obj_has_state(toggle, LV_STATE_CHECKED) == checked);
+      assert(changes == 0);
+    }
+  }
+  for (const auto key : {uint32_t(LV_KEY_ENTER), uint32_t(' ')}) {
+    for (unsigned press = 0; press < 2; ++press) {
+      const bool before = lv_obj_has_state(toggle, LV_STATE_CHECKED);
+      press_key(fixture, key);
+      assert(lv_obj_has_state(toggle, LV_STATE_CHECKED) != before);
+      assert(lv_group_get_focused(fixture.group) == toggle);
+      assert(changes == (key == LV_KEY_ENTER ? 0u : 2u) + press + 1);
+    }
+  }
+  // Long holds include repeated KEY events for Space and must toggle once.
+  for (const auto key : {uint32_t(LV_KEY_ENTER), uint32_t(' ')}) {
+    const bool before = lv_obj_has_state(toggle, LV_STATE_CHECKED);
+    const unsigned previous_changes = changes;
+    keyboard_sample_key = key;
+    keyboard_sample_state = LV_INDEV_STATE_PRESSED;
+    lv_indev_read(fixture.state.keyboard);
+    for (unsigned repeat = 0; repeat < 8; ++repeat) {
+      lv_tick_inc(500);
+      lv_indev_read(fixture.state.keyboard);
+    }
+    keyboard_sample_state = LV_INDEV_STATE_RELEASED;
+    lv_indev_read(fixture.state.keyboard);
+    assert(changes == previous_changes + 1);
+    assert(lv_obj_has_state(toggle, LV_STATE_CHECKED) != before);
+    assert(!fixture.state.space_pressed);
+  }
+  // Text entry still receives spaces normally.
+  auto *field = lv_textarea_create(lv_screen_active());
+  input_housekeeping(fixture.timer);
+  lv_group_focus_obj(field);
+  press_key(fixture, 'a');
+  press_key(fixture, ' ');
+  press_key(fixture, 'b');
+  assert(strcmp(lv_textarea_get_text(field), "a b") == 0);
+}
+
+static lv_obj_t *browse_region(lv_obj_t *parent, int x, int y, int height,
+                                int content_height) {
+  auto *region = lv_obj_create(parent);
+  lv_obj_remove_style_all(region);
+  lv_obj_set_pos(region, x, y);
+  lv_obj_set_size(region, 200, height);
+  lv_obj_set_scroll_dir(region, LV_DIR_VER);
+  cm0_input_set_scroll_region(region);
+  auto *content = lv_obj_create(region);
+  lv_obj_remove_style_all(content);
+  lv_obj_set_size(content, 180, content_height);
+  lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+  return region;
+}
+
+static void verify_browse_scrolling() {
+  InputFixture fixture;
+  auto *before = plain_control(lv_screen_active(), 0, 0);
+  auto *region = browse_region(lv_screen_active(), 0, 80, 140, 600);
+  auto *after = plain_control(lv_screen_active(), 280, 0);
+  auto *short_region = browse_region(lv_screen_active(), 280, 80, 100, 40);
+  // Repeated registration must not duplicate the browsing stop.
+  cm0_input_set_scroll_region(region);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({before, region, after});
+  assert(!lv_obj_get_group(short_region));
+  assert(!lv_obj_get_group(lv_obj_get_child(region, 0)));
+
+  lv_group_focus_obj(before);
+  press_key(fixture, LV_KEY_NEXT);
+  assert(lv_group_get_focused(fixture.group) == region);
+  for (unsigned step = 0; step < 5; ++step) {
+    const auto previous = lv_obj_get_scroll_y(region);
+    press_key(fixture, LV_KEY_DOWN);
+    assert(lv_group_get_focused(fixture.group) == region);
+    assert(lv_obj_get_scroll_y(region) > previous);
+  }
+  const auto browsed = lv_obj_get_scroll_y(region);
+  for (unsigned poll = 0; poll < 4; ++poll)
+    input_housekeeping(fixture.timer);
+  assert(lv_obj_get_scroll_y(region) == browsed);
+  press_key(fixture, LV_KEY_UP);
+  assert(lv_obj_get_scroll_y(region) < browsed);
+
+  // Exercise a held arrow through LVGL's actual key-repeat path.
+  keyboard_sample_key = LV_KEY_DOWN;
+  keyboard_sample_state = LV_INDEV_STATE_PRESSED;
+  lv_indev_read(fixture.state.keyboard);
+  const auto first_press = lv_obj_get_scroll_y(region);
+  lv_tick_inc(500);
+  lv_indev_read(fixture.state.keyboard);
+  lv_tick_inc(500);
+  lv_indev_read(fixture.state.keyboard);
+  assert(lv_obj_get_scroll_y(region) > first_press);
+  assert(lv_group_get_focused(fixture.group) == region);
+  keyboard_sample_state = LV_INDEV_STATE_RELEASED;
+  lv_indev_read(fixture.state.keyboard);
+  for (unsigned step = 0; step < 20; ++step)
+    press_key(fixture, LV_KEY_DOWN);
+  assert(lv_obj_get_scroll_bottom(region) == 0);
+  assert(lv_group_get_focused(fixture.group) == region);
+  for (unsigned step = 0; step < 20 && lv_obj_get_scroll_y(region) > 0; ++step)
+    press_key(fixture, LV_KEY_UP);
+  assert(lv_obj_get_scroll_y(region) == 0);
+  assert(lv_group_get_focused(fixture.group) == region);
+  press_key(fixture, LV_KEY_NEXT);
+  assert(lv_group_get_focused(fixture.group) == after);
+  press_key(fixture, LV_KEY_PREV);
+  assert(lv_group_get_focused(fixture.group) == region);
+  press_key(fixture, LV_KEY_PREV);
+  assert(lv_group_get_focused(fixture.group) == before);
+}
+
+static void verify_browse_dynamic_content() {
+  InputFixture fixture;
+  auto *before = plain_control(lv_screen_active(), 0, 0);
+  auto *region = browse_region(lv_screen_active(), 0, 80, 140, 500);
+  auto *after = plain_control(lv_screen_active(), 280, 0);
+  input_housekeeping(fixture.timer);
+  lv_group_focus_obj(region);
+  press_key(fixture, LV_KEY_DOWN);
+  assert(lv_obj_get_scroll_y(region) > 0);
+  // A refresh shrinks a focused, scrolled list to a single nonoverflowing row.
+  lv_obj_clean(region);
+  auto *content = lv_obj_create(region);
+  lv_obj_remove_style_all(content);
+  lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_size(content, 180, 40);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({before, after});
+  assert(!lv_obj_get_group(region));
+  assert(lv_group_get_focused(fixture.group) != region);
+  // Growing the same viewport again must restore its original Tab position.
+  lv_obj_set_height(content, 500);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({before, region, after});
+  lv_group_focus_obj(before);
+  press_key(fixture, LV_KEY_NEXT);
+  assert(lv_group_get_focused(fixture.group) == region);
+  press_key(fixture, LV_KEY_NEXT);
+  assert(lv_group_get_focused(fixture.group) == after);
+  press_key(fixture, LV_KEY_PREV);
+  assert(lv_group_get_focused(fixture.group) == region);
+  lv_obj_set_height(region, 520);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({before, after});
+  lv_obj_set_height(region, 140);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({before, region, after});
+  lv_obj_remove_flag(region, LV_OBJ_FLAG_SCROLLABLE);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({before, after});
+  lv_obj_add_flag(region, LV_OBJ_FLAG_SCROLLABLE);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({before, region, after});
+}
+
+static void verify_browse_visibility_and_scopes() {
+  InputFixture fixture;
+  auto *background = plain_control(lv_screen_active(), 0, 0);
+  auto *page = lv_obj_create(lv_screen_active());
+  lv_obj_remove_style_all(page);
+  lv_obj_set_size(page, 240, 400);
+  lv_obj_remove_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+  auto *region = browse_region(page, 0, 80, 140, 500);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({background, region});
+  lv_group_focus_obj(region);
+  lv_obj_add_flag(page, LV_OBJ_FLAG_HIDDEN);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({background});
+  lv_obj_remove_flag(page, LV_OBJ_FLAG_HIDDEN);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({background, region});
+  lv_group_focus_obj(region);
+  lv_obj_add_state(page, LV_STATE_DISABLED);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({background});
+  lv_obj_remove_state(page, LV_STATE_DISABLED);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({background, region});
+
+  auto *overlay = lv_obj_create(lv_layer_top());
+  lv_obj_remove_style_all(overlay);
+  lv_obj_set_size(overlay, 460, 600);
+  lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+  cm0_input_set_focus_scope(overlay);
+  auto *cancel = plain_control(overlay, 0, 0);
+  auto *modal_region = browse_region(overlay, 0, 80, 140, 500);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({cancel, modal_region});
+  lv_group_focus_obj(cancel);
+  press_key(fixture, LV_KEY_NEXT);
+  assert(lv_group_get_focused(fixture.group) == modal_region);
+  press_key(fixture, LV_KEY_NEXT);
+  assert(lv_group_get_focused(fixture.group) == cancel);
+  press_key(fixture, LV_KEY_PREV);
+  assert(lv_group_get_focused(fixture.group) == modal_region);
+  auto *nested = lv_obj_create(overlay);
+  lv_obj_remove_style_all(nested);
+  lv_obj_set_size(nested, 440, 500);
+  lv_obj_remove_flag(nested, LV_OBJ_FLAG_SCROLLABLE);
+  cm0_input_set_focus_scope(nested);
+  auto *close = plain_control(nested, 0, 0);
+  auto *nested_region = browse_region(nested, 0, 80, 140, 500);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({close, nested_region});
+  lv_group_focus_obj(nested_region);
+  press_key(fixture, LV_KEY_DOWN);
+  assert(lv_obj_get_scroll_y(nested_region) > 0);
+  assert(lv_obj_get_scroll_y(modal_region) == 0);
+  assert(lv_obj_get_scroll_y(region) == 0);
+  lv_obj_delete(nested);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({cancel, modal_region});
+  lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({background, region});
+  lv_obj_remove_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({cancel, modal_region});
+  lv_obj_delete(overlay);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({background, region});
+}
+
+static void verify_nested_browse_regions() {
+  InputFixture fixture;
+  auto *before = plain_control(lv_screen_active(), 0, 0);
+  auto *outer = browse_region(lv_screen_active(), 0, 80, 200, 700);
+  auto *inner = browse_region(outer, 0, 0, 100, 400);
+  auto *after = plain_control(lv_screen_active(), 280, 0);
+  input_housekeeping(fixture.timer);
+  fixture.expect_members({before, outer, inner, after});
+  lv_group_focus_obj(outer);
+  press_key(fixture, LV_KEY_DOWN);
+  assert(lv_group_get_focused(fixture.group) == inner);
+  assert(lv_obj_get_scroll_y(outer) == 0);
+  assert(lv_obj_get_scroll_y(inner) == 0);
+  press_key(fixture, LV_KEY_DOWN);
+  assert(lv_obj_get_scroll_y(inner) > 0);
+  assert(lv_obj_get_scroll_y(outer) == 0);
+  press_key(fixture, LV_KEY_NEXT);
+  assert(lv_group_get_focused(fixture.group) == after);
+  press_key(fixture, LV_KEY_PREV);
+  assert(lv_group_get_focused(fixture.group) == inner);
+  press_key(fixture, LV_KEY_PREV);
+  assert(lv_group_get_focused(fixture.group) == outer);
+
+  // Tab must reveal a nested viewport that sits below the visible part of its
+  // parent, while retaining the position already browsed inside that viewport.
+  const auto inner_scroll = lv_obj_get_scroll_y(inner);
+  lv_obj_set_y(inner, 300);
+  lv_obj_scroll_to_y(outer, 0, LV_ANIM_OFF);
+  press_key(fixture, LV_KEY_NEXT);
+  assert(lv_group_get_focused(fixture.group) == inner);
+  for (unsigned step = 0; step < 30; ++step) {
+    lv_tick_inc(20);
+    lv_timer_handler();
+  }
+  assert(lv_obj_get_scroll_y(outer) > 0);
+  assert(lv_obj_get_scroll_y(inner) == inner_scroll);
+}
+
+static void verify_browse_region() {
+  verify_browse_scrolling();
+  verify_browse_dynamic_content();
+  verify_browse_visibility_and_scopes();
+  verify_nested_browse_regions();
 }
 
 static void verify_modal_scope() {
@@ -576,27 +924,43 @@ static void verify_focus_ring() {
     frame.resize(size.x * size.y);
     lv_obj_update_layout(clip);
     lv_refr_now(fixture.display);
-    const auto blue = [&](int x, int y) {
+    const auto focus_ring = [&](int x, int y) {
       const auto &pixel = frame[y * size.x + x];
-      return pixel.red == 0 && pixel.green == 0x7a && pixel.blue == 0xff;
+      return pixel.red == 0x25 && pixel.green == 0x29 && pixel.blue == 0x32;
     };
     if (!focus_activated) {
-      assert(!blue(20, 20));
-      assert(!blue(20, 50));
+      assert(!focus_ring(20, 20));
+      assert(!focus_ring(20, 50));
       press_key(fixture, LV_KEY_NEXT);
       assert(fixture.state.focus_visible);
       lv_refr_now(fixture.display);
       focus_activated = true;
     }
     for (int x = 20; x < 120; ++x) {
-      assert(blue(x, 20));
-      assert(blue(x, 89));
+      assert(focus_ring(x, 20));
+      assert(focus_ring(x, 89));
     }
     for (int y = 20; y < 90; ++y) {
-      assert(blue(20, y));
-      assert(blue(119, y));
+      assert(focus_ring(20, y));
+      assert(focus_ring(119, y));
     }
-    assert(!blue(19, 50) && !blue(120, 50));
+    assert(!focus_ring(19, 50) && !focus_ring(120, 50));
+    // Keep both edges visible on action blue, dark photos, and light cards.
+    for (const uint32_t background : {0x0b82ff, 0x20262d, 0xffffff}) {
+      lv_obj_set_style_bg_color(photo, lv_color_hex(background), 0);
+      lv_refr_now(fixture.display);
+      assert(focus_ring(70, 21) && focus_ring(70, 88));
+      assert(focus_ring(21, 50) && focus_ring(118, 50));
+      for (const auto point : {lv_point_t{70, 22}, lv_point_t{70, 87},
+                               lv_point_t{22, 50}, lv_point_t{117, 50}}) {
+        const auto &pixel = frame[point.y * size.x + point.x];
+        assert(pixel.red == 0xff && pixel.green == 0xff && pixel.blue == 0xff);
+      }
+      const auto &center = frame[50 * size.x + 70];
+      assert(center.red == ((background >> 16) & 0xff));
+      assert(center.green == ((background >> 8) & 0xff));
+      assert(center.blue == (background & 0xff));
+    }
     // Optional artifact used for visual inspection alongside pixel assertions.
     if (const char *path = getenv("LILYGO_FOCUS_RING_PPM")) {
       std::ofstream file(path, std::ios::binary);
@@ -605,6 +969,109 @@ static void verify_focus_ring() {
         file.put(pixel.red); file.put(pixel.green); file.put(pixel.blue);
       }
     }
+  }
+
+  // Use the app's switch size and indicator color, retaining the theme's
+  // rounded track and knob. Focus must remain visible in either switch state.
+  auto *toggle = lv_switch_create(lv_screen_active());
+  lv_obj_set_pos(toggle, 140, 20);
+  lv_obj_set_size(toggle, 48, 28);
+  lv_obj_set_style_anim_duration(toggle, 0, 0);
+  lv_obj_set_style_bg_color(toggle, lv_color_hex(0x0b82ff),
+                            LV_PART_INDICATOR | LV_STATE_CHECKED);
+  input_housekeeping(fixture.timer);
+  lv_display_set_resolution(fixture.display, 320, 568);
+  frame.assign(320 * 568, {});
+  lv_obj_update_layout(toggle);
+  const auto dark = [&](int x, int y) {
+    const auto &pixel = frame[y * 320 + x];
+    return pixel.red == 0x25 && pixel.green == 0x29 && pixel.blue == 0x32;
+  };
+  for (const bool checked : {false, true}) {
+    lv_obj_set_state(toggle, LV_STATE_CHECKED, checked);
+    lv_group_focus_obj(tile);
+    lv_refr_now(fixture.display);
+    assert(!dark(164, 21));
+    lv_group_focus_obj(toggle);
+    lv_refr_now(fixture.display);
+    assert(dark(164, 21) && dark(164, 46));
+    assert(dark(141, 34) && dark(186, 34));
+    assert(!dark(139, 34) && !dark(188, 34));
+  }
+}
+
+static void verify_native_focus_outline() {
+  InputFixture fixture;
+  std::vector<lv_color32_t> frame;
+  lv_display_set_user_data(fixture.display, &frame);
+  lv_display_set_flush_cb(fixture.display, [](lv_display_t *display,
+                                              const lv_area_t *area, uint8_t *pixels) {
+    auto &frame = *static_cast<std::vector<lv_color32_t> *>(lv_display_get_user_data(display));
+    const int width = lv_display_get_horizontal_resolution(display);
+    auto *source = reinterpret_cast<lv_color32_t *>(pixels);
+    for (int y = area->y1; y <= area->y2; ++y)
+      std::copy_n(source + (y - area->y1) * lv_area_get_width(area),
+                  lv_area_get_width(area), frame.begin() + y * width + area->x1);
+    lv_display_flush_ready(display);
+  });
+  frame.resize(480 * 640);
+  auto *other = plain_control(lv_screen_active(), 20, 20);
+  input_housekeeping(fixture.timer);
+  // An explicit local focus outline keeps the native LVGL treatment. Exercise
+  // both selectors through real keypad focus and leave room on all four sides.
+  for (const auto selector : {LV_STATE_FOCUS_KEY, LV_STATE_FOCUSED}) {
+    auto *button = lv_button_create(lv_screen_active());
+    lv_obj_remove_style_all(button);
+    lv_obj_set_pos(button, 200, 150);
+    lv_obj_set_size(button, 120, 60);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x303030), 0);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
+    const int width = lv_display_dpx(fixture.display, 3);
+    lv_obj_set_style_outline_width(button, width, selector);
+    lv_obj_set_style_outline_pad(button, width, selector);
+    lv_obj_set_style_outline_color(button, lv_theme_get_color_primary(button), selector);
+    lv_obj_set_style_outline_opa(button, LV_OPA_50, selector);
+    input_housekeeping(fixture.timer);
+    lv_obj_update_layout(button);
+    lv_refr_now(fixture.display);
+    const auto pixel = [&](int x, int y) -> const lv_color32_t & {
+      return frame[y * lv_display_get_horizontal_resolution(fixture.display) + x];
+    };
+    const auto same_rgb = [](const lv_color32_t &a, const lv_color32_t &b) {
+      return a.red == b.red && a.green == b.green && a.blue == b.blue;
+    };
+    lv_area_t bounds;
+    lv_obj_get_coords(button, &bounds);
+    const int cx = (bounds.x1 + bounds.x2) / 2;
+    const int cy = (bounds.y1 + bounds.y2) / 2;
+    const lv_point_t outside[] = {{bounds.x1 - width - 1, cy},
+                                  {bounds.x2 + width + 1, cy},
+                                  {cx, bounds.y1 - width - 1},
+                                  {cx, bounds.y2 + width + 1}};
+    std::vector<lv_color32_t> unfocused;
+    for (const auto &point : outside) unfocused.push_back(pixel(point.x, point.y));
+    press_key(fixture, LV_KEY_NEXT);
+    assert(lv_group_get_focused(fixture.group) == button);
+    assert(lv_obj_has_state(button, LV_STATE_FOCUS_KEY));
+    input_housekeeping(fixture.timer);
+    assert(lv_obj_get_style_outline_opa(button, LV_PART_MAIN) == LV_OPA_50);
+    lv_refr_now(fixture.display);
+    for (size_t i = 0; i < unfocused.size(); ++i)
+      assert(!same_rgb(pixel(outside[i].x, outside[i].y), unfocused[i]));
+    // The gap remains clear and the original fill reaches every inside edge;
+    // the runtime must not add its default inner stroke.
+    assert(same_rgb(pixel(bounds.x1 - 1, cy), unfocused[0]));
+    for (const auto &point : {lv_point_t{bounds.x1, cy}, lv_point_t{bounds.x2, cy},
+                              lv_point_t{cx, bounds.y1}, lv_point_t{cx, bounds.y2}}) {
+      const auto &color = pixel(point.x, point.y);
+      assert(color.red == 0x30 && color.green == 0x30 && color.blue == 0x30);
+    }
+    press_key(fixture, LV_KEY_NEXT);
+    assert(lv_group_get_focused(fixture.group) == other);
+    lv_refr_now(fixture.display);
+    for (size_t i = 0; i < unfocused.size(); ++i)
+      assert(same_rgb(pixel(outside[i].x, outside[i].y), unfocused[i]));
+    lv_obj_delete(button);
   }
 }
 
@@ -624,12 +1091,19 @@ int main(int argc, char **argv) {
     verify_enter_submission();
   else if (strcmp(argv[1], "hotplug") == 0)
     verify_keyboard_hotplug();
-  else if (strcmp(argv[1], "navigation") == 0)
+  else if (strcmp(argv[1], "navigation") == 0) {
     verify_navigation();
+    verify_unmarked_scroll_navigation();
+    verify_switch_keys();
+  }
+  else if (strcmp(argv[1], "browse-region") == 0)
+    verify_browse_region();
   else if (strcmp(argv[1], "focus-cleanup") == 0)
     verify_focus_cleanup();
   else if (strcmp(argv[1], "scope") == 0)
     verify_modal_scope();
+  else if (strcmp(argv[1], "native-focus-outline") == 0)
+    verify_native_focus_outline();
   else if (strcmp(argv[1], "focus-ring") == 0)
     verify_focus_ring();
   else

@@ -1,6 +1,7 @@
 #include <cm0/app.h>
 #include <cm0/input.h>
 #include <cm0/status_bar.h>
+#include <src/core/lv_group_private.h>
 #include <src/misc/lv_event_private.h>
 
 #include <signal.h>
@@ -44,6 +45,8 @@ typedef struct app_input_state {
   lv_indev_t *keyboard;
   lv_group_t *group;
   lv_obj_t *scope;
+  lv_obj_t *navigation_region;
+  lv_area_t navigation_origin;
   volatile sig_atomic_t *running;
   bool hardware_keyboard;
   bool focus_suppressed;
@@ -51,6 +54,7 @@ typedef struct app_input_state {
   bool focus_visible;
   bool esc_pressed;
   bool enter_pressed;
+  bool space_pressed;
   uint32_t keyboard_scan_at;
 } app_input_state_t;
 
@@ -158,10 +162,22 @@ static bool object_disabled_in_tree(lv_obj_t *object) {
 }
 
 static void focus_scope_marker(lv_event_t *) {}
+static void scroll_region_marker(lv_event_t *) {}
 
 extern "C" void cm0_input_set_focus_scope(lv_obj_t *object) {
   if (object)
     lv_obj_add_event_cb(object, focus_scope_marker, LV_EVENT_DELETE, nullptr);
+}
+
+extern "C" void cm0_input_set_scroll_region(lv_obj_t *object) {
+  if (!object) return;
+  for (uint32_t i = 0; i < lv_obj_get_event_count(object); ++i) {
+    if (lv_event_dsc_get_cb(lv_obj_get_event_dsc(object, i)) ==
+        scroll_region_marker)
+      return;
+  }
+  lv_obj_add_event_cb(object, scroll_region_marker, LV_EVENT_DELETE, nullptr);
+  lv_obj_add_flag(object, LV_OBJ_FLAG_SCROLL_WITH_ARROW);
 }
 
 static bool is_focus_scope(lv_obj_t *object) {
@@ -169,6 +185,64 @@ static bool is_focus_scope(lv_obj_t *object) {
     if (lv_event_dsc_get_cb(lv_obj_get_event_dsc(object, i)) == focus_scope_marker)
       return true;
   return false;
+}
+
+static bool is_scroll_region(lv_obj_t *object) {
+  if (!object) return false;
+  for (uint32_t i = 0; i < lv_obj_get_event_count(object); ++i)
+    if (lv_event_dsc_get_cb(lv_obj_get_event_dsc(object, i)) ==
+        scroll_region_marker)
+      return true;
+  return false;
+}
+
+static bool in_scroll_region(lv_obj_t *object) {
+  for (; object; object = lv_obj_get_parent(object))
+    if (is_scroll_region(object)) return true;
+  return false;
+}
+
+static bool scroll_region_overflows(lv_obj_t *object) {
+  if (!is_scroll_region(object) ||
+      !lv_obj_has_flag(object, LV_OBJ_FLAG_SCROLLABLE))
+    return false;
+  lv_obj_update_layout(object);
+  const lv_dir_t direction = lv_obj_get_scroll_dir(object);
+  return ((direction & LV_DIR_VER) &&
+          lv_obj_get_scroll_top(object) + lv_obj_get_scroll_bottom(object) > 0) ||
+         ((direction & LV_DIR_HOR) &&
+          lv_obj_get_scroll_left(object) + lv_obj_get_scroll_right(object) > 0);
+}
+
+static lv_obj_t *next_tree_object(lv_obj_t *object) {
+  if (lv_obj_get_child_count(object)) return lv_obj_get_child(object, 0);
+  for (lv_obj_t *parent = lv_obj_get_parent(object); parent;
+       object = parent, parent = lv_obj_get_parent(parent)) {
+    const int32_t next = lv_obj_get_index(object) + 1;
+    if (next < static_cast<int32_t>(lv_obj_get_child_count(parent)))
+      return lv_obj_get_child(parent, next);
+  }
+  return nullptr;
+}
+
+static void add_scroll_region(lv_obj_t *object, lv_group_t *group) {
+  lv_group_add_obj(group, object);
+  // Standard widgets join the group during construction. Insert a discovered
+  // region before its contents (or next sibling), rather than after all buttons.
+  // Move the list node directly so ordering never fires focus/scroll callbacks.
+  lv_obj_t *next = next_tree_object(object);
+  while (next && lv_obj_get_group(next) != group) next = next_tree_object(next);
+  if (!next) return;
+  lv_obj_t **region_node = nullptr;
+  lv_obj_t **next_node = nullptr;
+  for (auto **entry = static_cast<lv_obj_t **>(lv_ll_get_head(&group->obj_ll));
+       entry;
+       entry = static_cast<lv_obj_t **>(lv_ll_get_next(&group->obj_ll, entry))) {
+    if (*entry == object) region_node = entry;
+    if (*entry == next) next_node = entry;
+  }
+  if (region_node && next_node)
+    lv_ll_move_before(&group->obj_ll, region_node, next_node);
 }
 
 static lv_obj_t *find_focus_scope(lv_obj_t *object) {
@@ -189,7 +263,8 @@ static bool in_focus_scope(lv_obj_t *object, const app_input_state_t *state) {
 
 static bool focus_candidate(lv_obj_t *object, const app_input_state_t *state) {
   return object && lv_obj_is_valid(object) && !object_hidden_in_tree(object) &&
-      !object_disabled_in_tree(object) && in_focus_scope(object, state);
+      !object_disabled_in_tree(object) && in_focus_scope(object, state) &&
+      (!is_scroll_region(object) || scroll_region_overflows(object));
 }
 
 static lv_obj_t *first_focus_candidate(const app_input_state_t *state) {
@@ -230,6 +305,22 @@ static bool has_click_action(lv_obj_t *object) {
   return false;
 }
 
+static bool has_application_focus_outline(lv_obj_t *object) {
+  const lv_style_selector_t selectors[] = {LV_STATE_FOCUS_KEY, LV_STATE_FOCUSED};
+  for (const auto selector : selectors) {
+    lv_style_value_t width;
+    if (lv_obj_get_local_style_prop(object, LV_STYLE_OUTLINE_WIDTH, &width,
+                                    selector) == LV_STYLE_RES_FOUND &&
+        width.num > 0)
+      return true;
+  }
+  return false;
+}
+
+static bool is_switch(lv_obj_t *object) {
+  return object && lv_obj_has_class(object, &lv_switch_class);
+}
+
 /* Draw after the children, inside the widget's bounds. An external outline is
  * clipped by zero-padding lists and edge-to-edge photo grids; a normal border
  * changes layout and can be covered by a canvas/image child. */
@@ -239,7 +330,7 @@ static void draw_keyboard_focus(lv_event_t *event) {
   if (!state->keyboard || !state->focus_visible ||
       lv_group_get_focused(state->group) != object ||
       !lv_obj_has_state(object, LV_STATE_FOCUSED) ||
-      object_disabled_in_tree(object))
+      object_disabled_in_tree(object) || has_application_focus_outline(object))
     return;
   lv_area_t area;
   lv_obj_get_coords(object, &area);
@@ -249,59 +340,237 @@ static void draw_keyboard_focus(lv_event_t *event) {
   ring.border_opa = LV_OPA_COVER;
   ring.border_side = LV_BORDER_SIDE_FULL;
   ring.border_width = 3;
-  ring.border_color = lv_color_hex(0x007aff);
+  // Use a neutral ring for every control so keyboard focus stays distinct
+  // from blue action fills, selected states, and switch indicators.
+  ring.border_color = lv_color_hex(0x252932);
   ring.radius = lv_obj_get_style_radius(object, LV_PART_MAIN);
   lv_draw_rect(lv_event_get_layer(event), &ring, &area);
+  // A white inner edge keeps the same inset ring visible over dark content.
+  if (lv_area_get_width(&area) > 4 && lv_area_get_height(&area) > 4) {
+    lv_area_increase(&area, -2, -2);
+    ring.border_width = 1;
+    ring.border_color = lv_color_white();
+    ring.radius = LV_MAX(0, ring.radius - 2);
+    lv_draw_rect(lv_event_get_layer(event), &ring, &area);
+  }
+}
+
+static bool contains_object(lv_obj_t *ancestor, lv_obj_t *object) {
+  for (; object; object = lv_obj_get_parent(object))
+    if (object == ancestor) return true;
+  return false;
+}
+
+static bool intersect_bounds(lv_area_t *area, const lv_area_t &clip) {
+  area->x1 = LV_MAX(area->x1, clip.x1);
+  area->y1 = LV_MAX(area->y1, clip.y1);
+  area->x2 = LV_MIN(area->x2, clip.x2);
+  area->y2 = LV_MIN(area->y2, clip.y2);
+  return area->x1 <= area->x2 && area->y1 <= area->y2;
+}
+
+static bool visible_navigation_bounds(lv_obj_t *object, lv_area_t *area) {
+  lv_obj_get_coords(object, area);
+  lv_display_t *display = lv_obj_get_display(object);
+  const lv_area_t screen{0, 0, lv_display_get_horizontal_resolution(display) - 1,
+                         lv_display_get_vertical_resolution(display) - 1};
+  if (!intersect_bounds(area, screen)) return false;
+  for (auto *parent = lv_obj_get_parent(object); parent;
+       parent = lv_obj_get_parent(parent)) {
+    if (lv_obj_has_flag(parent, LV_OBJ_FLAG_OVERFLOW_VISIBLE)) continue;
+    lv_area_t clip;
+    lv_obj_get_coords(parent, &clip);
+    if (!intersect_bounds(area, clip)) return false;
+  }
+  return true;
+}
+
+static bool horizontal_key(uint32_t key) {
+  return key == LV_KEY_LEFT || key == LV_KEY_RIGHT;
+}
+
+static bool previous_key(uint32_t key) {
+  return key == LV_KEY_LEFT || key == LV_KEY_UP;
+}
+
+static bool region_can_scroll(lv_obj_t *region, uint32_t key) {
+  if (!scroll_region_overflows(region)) return false;
+  const lv_dir_t direction = lv_obj_get_scroll_dir(region);
+  if (horizontal_key(key)) {
+    return (direction & LV_DIR_HOR) &&
+        (key == LV_KEY_LEFT ? lv_obj_get_scroll_left(region)
+                            : lv_obj_get_scroll_right(region)) > 0;
+  }
+  return (direction & LV_DIR_VER) &&
+      (key == LV_KEY_UP ? lv_obj_get_scroll_top(region)
+                        : lv_obj_get_scroll_bottom(region)) > 0;
+}
+
+struct navigation_target {
+  lv_obj_t *object = nullptr;
+  lv_area_t area{};
+  int64_t score = INT64_MAX;
+};
+
+static navigation_target directional_target(lv_obj_t *object,
+    const lv_area_t &origin, uint32_t key, app_input_state_t *state,
+    lv_obj_t *within = nullptr) {
+  navigation_target best;
+  const bool horizontal = horizontal_key(key);
+  const bool previous = previous_key(key);
+  const bool browsing = in_scroll_region(object);
+  const int32_t x = (origin.x1 + origin.x2) / 2;
+  const int32_t y = (origin.y1 + origin.y2) / 2;
+  for (uint32_t i = 0; i < lv_group_get_obj_count(state->group); ++i) {
+    auto *candidate = lv_group_get_obj_by_index(state->group, i);
+    if (candidate == object || !focus_candidate(candidate, state) ||
+        contains_object(candidate, object) ||
+        (within && !contains_object(within, candidate)))
+      continue;
+    lv_area_t area, full;
+    lv_obj_get_coords(candidate, &full);
+    area = full;
+    if (browsing || in_scroll_region(candidate)) {
+      if (!visible_navigation_bounds(candidate, &area)) continue;
+      // Explicit browsing regions reveal clipped controls by scrolling first.
+      if (!is_scroll_region(candidate) &&
+          (area.x1 != full.x1 || area.y1 != full.y1 ||
+           area.x2 != full.x2 || area.y2 != full.y2))
+        continue;
+    }
+    int32_t cx = (area.x1 + area.x2) / 2;
+    int32_t cy = (area.y1 + area.y2) / 2;
+    // Treat a content region as an entrance at its near edge. Using its center
+    // would favor a distant button over the intervening read-only content.
+    if (is_scroll_region(candidate)) {
+      if (horizontal) {
+        cx = previous ? area.x2 : area.x1;
+        cy = LV_CLAMP(area.y1, y, area.y2);
+      } else {
+        cy = previous ? area.y2 : area.y1;
+        cx = LV_CLAMP(area.x1, x, area.x2);
+      }
+    }
+    const int32_t dx = cx - x;
+    const int32_t dy = cy - y;
+    const int32_t delta = horizontal ? dx : dy;
+    if (previous ? delta >= 0 : delta <= 0) continue;
+    const bool same_band = horizontal
+        ? origin.y1 <= area.y2 && area.y1 <= origin.y2
+        : origin.x1 <= area.x2 && area.x1 <= origin.x2;
+    const int64_t primary = abs(delta);
+    const int64_t secondary = abs(horizontal ? dy : dx);
+    const int64_t score = (same_band ? 0 : INT64_C(1) << 50) +
+                          primary * primary + secondary * secondary;
+    if (score < best.score) best = {candidate, area, score};
+  }
+  return best;
+}
+
+static void navigation_focus(lv_obj_t *object, app_input_state_t *state) {
+  state->navigation_region = nullptr;
+  // Explicit browsing regions select visible candidates and scroll in steps.
+  // Other lists retain LVGL's existing reveal-on-focus navigation behavior.
+  const bool browsing = in_scroll_region(object);
+  const bool reveal = browsing &&
+      lv_obj_has_flag(object, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+  if (reveal) lv_obj_remove_flag(object, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+  lv_group_focus_obj(object);
+  if (reveal && lv_obj_is_valid(object))
+    lv_obj_add_flag(object, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+  if (!browsing && lv_obj_is_valid(object))
+    lv_obj_scroll_to_view_recursive(object, LV_ANIM_OFF);
 }
 
 static void navigate_keyboard_focus(lv_event_t *event) {
   auto *state = static_cast<app_input_state_t *>(lv_event_get_user_data(event));
   lv_obj_t *object = lv_event_get_target_obj(event);
   const uint32_t key = lv_event_get_key(event);
-  const bool horizontal = key == LV_KEY_LEFT || key == LV_KEY_RIGHT;
-  if ((!horizontal && key != LV_KEY_UP && key != LV_KEY_DOWN) ||
-      lv_obj_is_editable(object) || lv_obj_has_flag(object, LV_OBJ_FLAG_CHECKABLE) ||
-      lv_group_get_focused(state->group) != object)
+  if (lv_group_get_focused(state->group) != object ||
+      object_disabled_in_tree(object))
     return;
-
+  if (is_switch(object) && key == ' ') {
+    lv_event_stop_processing(event);
+    // Space arrives as a repeating character key, unlike Enter's native
+    // press/release activation. Change the value only once per physical press.
+    if (state->space_pressed) return;
+    state->space_pressed = true;
+    lv_obj_set_state(object, LV_STATE_CHECKED,
+                     !lv_obj_has_state(object, LV_STATE_CHECKED));
+    lv_obj_send_event(object, LV_EVENT_VALUE_CHANGED, nullptr);
+    return;
+  }
+  if ((!horizontal_key(key) && key != LV_KEY_UP && key != LV_KEY_DOWN) ||
+      lv_obj_is_editable(object) ||
+      (horizontal_key(key) && lv_obj_has_flag(object, LV_OBJ_FLAG_CHECKABLE) &&
+       !is_switch(object)))
+    return;
+  // Preprocess arrows before LVGL's base object handler. Otherwise a region
+  // would scroll once natively and then move focus or scroll a second time.
+  lv_event_stop_processing(event);
   lv_obj_update_layout(object);
   lv_area_t origin;
-  lv_obj_get_coords(object, &origin);
-  const int32_t x = (origin.x1 + origin.x2) / 2;
-  const int32_t y = (origin.y1 + origin.y2) / 2;
-  const bool previous = key == LV_KEY_LEFT || key == LV_KEY_UP;
-  lv_obj_t *best = nullptr;
-  int64_t best_score = INT64_MAX;
-  for (uint32_t i = 0; i < lv_group_get_obj_count(state->group); ++i) {
-    lv_obj_t *candidate = lv_group_get_obj_by_index(state->group, i);
-    if (candidate == object || object_hidden_in_tree(candidate) ||
-        object_disabled_in_tree(candidate))
-      continue;
-    lv_area_t area;
-    lv_obj_get_coords(candidate, &area);
-    if (lv_area_get_width(&area) <= 0 || lv_area_get_height(&area) <= 0) continue;
-    const int32_t dx = (area.x1 + area.x2) / 2 - x;
-    const int32_t dy = (area.y1 + area.y2) / 2 - y;
-    const int32_t delta = horizontal ? dx : dy;
-    if (previous ? delta >= 0 : delta <= 0) continue;
-    const bool same_band = horizontal
-        ? origin.y1 <= area.y2 && area.y1 <= origin.y2
-        : origin.x1 <= area.x2 && area.x1 <= origin.x2;
-    // Prefer the same row/column, then distance. Tab always reaches the full
-    // group, including editors whose arrow keys retain their native meaning.
-    const int64_t primary = abs(delta);
-    const int64_t secondary = abs(horizontal ? dy : dx);
-    const int64_t score = (same_band ? 0 : INT64_C(1) << 50) +
-                          primary * primary + secondary * secondary;
-    if (score < best_score) {
-      best = candidate;
-      best_score = score;
+  if (in_scroll_region(object)) {
+    if (!visible_navigation_bounds(object, &origin)) return;
+  } else {
+    lv_obj_get_coords(object, &origin);
+  }
+  if (is_scroll_region(object)) {
+    if (state->navigation_region == object) {
+      origin = state->navigation_origin;
+    } else if (horizontal_key(key)) {
+      origin.x1 = origin.x2 = previous_key(key) ? origin.x2 + 1 : origin.x1 - 1;
+    } else {
+      origin.y1 = origin.y2 = previous_key(key) ? origin.y2 + 1 : origin.y1 - 1;
     }
   }
-  if (best) {
-    lv_group_focus_obj(best);
-    lv_obj_scroll_to_view_recursive(best, LV_ANIM_OFF);
+
+  for (auto *region = object; region; region = lv_obj_get_parent(region)) {
+    if (!region_can_scroll(region, key) || !in_focus_scope(region, state)) continue;
+    lv_area_t viewport;
+    if (!visible_navigation_bounds(region, &viewport)) continue;
+    auto target = directional_target(object, origin, key, state, region);
+    const int32_t extent = horizontal_key(key) ? lv_area_get_width(&viewport)
+                                              : lv_area_get_height(&viewport);
+    const int32_t step = LV_MAX(1, extent / 4);
+    const int32_t gap = !target.object ? INT32_MAX : horizontal_key(key)
+        ? (previous_key(key) ? origin.x1 - target.area.x2
+                             : target.area.x1 - origin.x2)
+        : (previous_key(key) ? origin.y1 - target.area.y2
+                             : target.area.y1 - origin.y2);
+    if (target.object && gap <= step) {
+      navigation_focus(target.object, state);
+      return;
+    }
+    const int32_t old_x = lv_obj_get_scroll_x(region);
+    const int32_t old_y = lv_obj_get_scroll_y(region);
+    const int32_t offset = previous_key(key) ? -step : step;
+    if (horizontal_key(key))
+      lv_obj_scroll_to_x(region, old_x + offset, LV_ANIM_OFF);
+    else
+      lv_obj_scroll_to_y(region, old_y + offset, LV_ANIM_OFF);
+    const int32_t dx = lv_obj_get_scroll_x(region) - old_x;
+    const int32_t dy = lv_obj_get_scroll_y(region) - old_y;
+    if (!dx && !dy) continue;
+    navigation_focus(region, state);
+    state->navigation_region = region;
+    // Retain the reading position when control focus becomes viewport focus.
+    // Clamp at its edge as the old control scrolls out of sight.
+    origin.x1 = LV_CLAMP(viewport.x1, origin.x1 - dx, viewport.x2);
+    origin.x2 = LV_CLAMP(viewport.x1, origin.x2 - dx, viewport.x2);
+    origin.y1 = LV_CLAMP(viewport.y1, origin.y1 - dy, viewport.y2);
+    origin.y2 = LV_CLAMP(viewport.y1, origin.y2 - dy, viewport.y2);
+    state->navigation_origin = origin;
+    return;
   }
+  // Scroll limits and unused axes lead naturally to the next visible control.
+  if (auto target = directional_target(object, origin, key, state); target.object)
+    navigation_focus(target.object, state);
+}
+
+static void reset_navigation_origin(lv_event_t *event) {
+  auto *state = static_cast<app_input_state_t *>(lv_event_get_user_data(event));
+  state->navigation_region = nullptr;
 }
 
 static void watch_navigation_object(lv_obj_t *object, app_input_state_t *state) {
@@ -309,12 +578,17 @@ static void watch_navigation_object(lv_obj_t *object, app_input_state_t *state) 
   for (uint32_t i = 0; i < lv_obj_get_event_count(object); ++i) {
     lv_event_dsc_t *descriptor = lv_obj_get_event_dsc(object, i);
     if (lv_event_dsc_get_cb(descriptor) == draw_keyboard_focus) return;
-    if (descriptor->filter == LV_EVENT_KEY) custom_keys = true;
+    if ((descriptor->filter & ~LV_EVENT_PREPROCESS) == LV_EVENT_KEY) custom_keys = true;
   }
   lv_obj_add_event_cb(object, draw_keyboard_focus, LV_EVENT_DRAW_POST, state);
+  // Reveal a nested viewport by scrolling its ancestors, preserving its own
+  // content position just as LVGL does for other focused objects.
   lv_obj_add_flag(object, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+  lv_obj_add_event_cb(object, reset_navigation_origin, LV_EVENT_FOCUSED, state);
   if (!custom_keys)
-    lv_obj_add_event_cb(object, navigate_keyboard_focus, LV_EVENT_KEY, state);
+    lv_obj_add_event_cb(object, navigate_keyboard_focus,
+        static_cast<lv_event_code_t>(LV_EVENT_KEY | LV_EVENT_PREPROCESS), state);
+  if (has_application_focus_outline(object)) return;
   // Replace the theme's clipped exterior outline without changing dimensions.
   lv_obj_set_style_outline_opa(object, LV_OPA_TRANSP, LV_STATE_FOCUS_KEY);
   lv_obj_set_style_outline_opa(object, LV_OPA_TRANSP, LV_STATE_FOCUSED);
@@ -366,6 +640,7 @@ static void hardware_key_event(lv_event_t *event) {
   if (input_state == LV_INDEV_STATE_RELEASED) {
     if (key == LV_KEY_ESC) state->esc_pressed = false;
     if (key == LV_KEY_ENTER) state->enter_pressed = false;
+    if (key == ' ') state->space_pressed = false;
     return;
   }
   if (input_state != LV_INDEV_STATE_PRESSED) return;
@@ -457,20 +732,24 @@ static void keyboard_deleted(lv_event_t *event) {
   /* evdev deletes the old indev when a driver rebind removes its event node.
    * Never retain that pointer or a held Enter/Esc across a reconnect. */
   state->keyboard = nullptr;
+  state->navigation_region = nullptr;
   state->hardware_keyboard = false;
   state->focus_visible = false;
   state->esc_pressed = false;
   state->enter_pressed = false;
+  state->space_pressed = false;
   state->keyboard_scan_at = lv_tick_get();
 }
 
 static void attach_keyboard(app_input_state_t *state, lv_indev_t *keyboard,
                              bool hardware_keyboard) {
   state->keyboard = keyboard;
+  state->navigation_region = nullptr;
   state->hardware_keyboard = keyboard && hardware_keyboard;
   state->focus_visible = false;
   state->esc_pressed = false;
   state->enter_pressed = false;
+  state->space_pressed = false;
   if (!keyboard) return;
   state->focus_suppressed = false;
   lv_indev_set_group(keyboard, state->group);
@@ -483,6 +762,7 @@ static void attach_keyboard(app_input_state_t *state, lv_indev_t *keyboard,
 static void pointer_focus_event(lv_event_t *event) {
   auto *state = static_cast<app_input_state_t *>(lv_event_get_user_data(event));
   if (!state || !state->group) return;
+  state->navigation_region = nullptr;
   state->focus_visible = true;
   state->focus_suppressed = false;
   /* ESC deliberately removes all group members.  Re-add the object under the
@@ -517,12 +797,20 @@ static void collect_focusable(lv_obj_t *object, lv_group_t *group,
    * when they have an activation callback rather than merely container flags. */
   const bool navigable = in_focus_scope(object, state) &&
       !is_focus_scope(object) && !is_software_keyboard(object) &&
-      lv_obj_has_flag(object, LV_OBJ_FLAG_CLICKABLE) &&
-      (lv_obj_is_group_def(object) || (editable && user_focused) ||
-       has_click_action(object));
+      ((is_scroll_region(object) && scroll_region_overflows(object)) ||
+       (lv_obj_has_flag(object, LV_OBJ_FLAG_CLICKABLE) &&
+        (lv_obj_is_group_def(object) || (editable && user_focused) ||
+         has_click_action(object))));
   if (navigable) {
     watch_navigation_object(object, state);
-    if (lv_obj_get_group(object) == nullptr) lv_group_add_obj(group, object);
+    if (lv_obj_get_group(object) == nullptr) {
+      if (is_scroll_region(object))
+        add_scroll_region(object, group);
+      else
+        lv_group_add_obj(group, object);
+    }
+  } else if (is_scroll_region(object) && lv_obj_get_group(object) == group) {
+    lv_group_remove_obj(object);
   } else if (!lv_obj_has_flag(object, LV_OBJ_FLAG_CLICKABLE) &&
              lv_obj_is_group_def(object) && lv_obj_get_group(object) == group) {
     lv_group_remove_obj(object);

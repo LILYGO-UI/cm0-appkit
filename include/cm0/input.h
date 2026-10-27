@@ -30,6 +30,12 @@ bool cm0_input_hardware_keyboard_present(void);
  * to restore the enclosing focus scope. The frontmost visible scope wins. */
 void cm0_input_set_focus_scope(lv_obj_t *object);
 
+/* Make an overflowing scrollable object a keyboard browsing region. Arrows
+ * navigate visible controls and scroll incrementally through its contents.
+ * At a scroll boundary, arrows can move to adjacent controls. Tab remains
+ * available to enter and leave the region directly. */
+void cm0_input_set_scroll_region(lv_obj_t *object);
+
 #ifdef __cplusplus
 }
 #endif
