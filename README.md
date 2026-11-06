@@ -37,6 +37,22 @@ CMake cache once (`cmake --fresh --preset host-simulator` with CMake 3.24+).
 The source preset then selects the submodule again. SDK implementation updates
 require rebuilding and deploying the affected applications.
 
+### Display refresh cadence
+
+The shared `config/lv_conf.h` sets `LV_DEF_REFR_PERIOD` to 20 ms for the
+50 Hz panel. LVGL uses this interval for display refresh, animation steps,
+and default input polling in both device and simulator builds. This is a
+scheduling target; rendering time and display synchronization determine the
+achieved frame rate, and static content does not require continuous redraws.
+
+Consumers pinned to an earlier AppKit revision can select the same cadence
+with `add_compile_definitions(LV_DEF_REFR_PERIOD=20)` before
+`find_package(LilyGoUI CONFIG REQUIRED)`. The definition must also reach the
+statically compiled LVGL sources. Rebuild and redeploy each consumer after
+changing the interval; installing an updated SDK alone cannot change existing
+application executables. Media playback and sensor sampling retain their own
+source-specific timing.
+
 ## AppKit development
 
 Install CMake, pkg-config, SDL2, FreeType, and LPM (`lilygo-lpm`), then run in

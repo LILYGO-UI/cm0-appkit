@@ -5,6 +5,11 @@
 #define LV_COLOR_DEPTH 32
 #define LV_MEM_SIZE (8U * 1024U * 1024U)
 
+/* Match the 50 Hz panel: display refresh, animation steps and input polling. */
+#ifndef LV_DEF_REFR_PERIOD
+#define LV_DEF_REFR_PERIOD 20
+#endif
+
 #ifndef LILYGO_UI_USE_OPENGLES
 #define LILYGO_UI_USE_OPENGLES 0
 #endif

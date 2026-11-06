@@ -58,6 +58,16 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
     add_test(NAME cm0-appkit-typography
         COMMAND cm0-appkit-typography-tests)
 
+    add_executable(lilygo-ui-refresh-cadence-tests
+        tests/test_refresh_cadence.cpp)
+    target_compile_features(lilygo-ui-refresh-cadence-tests PRIVATE cxx_std_17)
+    target_compile_options(lilygo-ui-refresh-cadence-tests PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    target_link_libraries(lilygo-ui-refresh-cadence-tests PRIVATE
+        LilyGoUI::LVGL LilyGoUI::UIFonts)
+    add_test(NAME lilygo-ui-refresh-cadence
+        COMMAND lilygo-ui-refresh-cadence-tests)
+
     add_executable(lilygo-ui-runtime-input-tests
         tests/test_runtime_input.cpp)
     target_compile_features(lilygo-ui-runtime-input-tests PRIVATE cxx_std_17)
